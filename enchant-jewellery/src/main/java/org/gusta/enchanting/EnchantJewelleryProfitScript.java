@@ -6,6 +6,7 @@ import com.epicbot.api.shared.entity.ItemWidget;
 import com.epicbot.api.shared.entity.WidgetChild;
 import com.epicbot.api.shared.event.ChatMessageEvent;
 import com.epicbot.api.shared.methods.IBankAPI;
+import com.epicbot.api.shared.methods.ITabsAPI;
 import com.epicbot.api.shared.model.ItemDetail;
 import com.epicbot.api.shared.model.Skill;
 import com.epicbot.api.shared.model.Spell;
@@ -44,6 +45,12 @@ public class EnchantJewelleryProfitScript extends Script {
     private static final int MAX_BATCH_CASTS = 420;
     private static final int RESTOCK_MIN_CASTS = 540;
     private static final int RESTOCK_MAX_CASTS = 1080;
+    private static final int SPELLBOOK_GROUP = 218;
+    private static final int JEWELLERY_ENCHANTMENTS_CHILD = 15;
+    private static final int LEVEL_1_ENCHANT_CHILD = 16;
+    private static final int LEVEL_2_ENCHANT_CHILD = 11;
+    private static final int LEVEL_3_ENCHANT_CHILD = 13;
+    private static final int LEVEL_4_ENCHANT_CHILD = 14;
     private static final long METHOD_REFRESH_MS = 4 * 60_000L;
     private static final double BUY_MARKUP = 1.10D;
     private static final double SELL_MARKDOWN = 0.98D;
@@ -57,6 +64,7 @@ public class EnchantJewelleryProfitScript extends Script {
                     "Sapphire rings",
                     7,
                     Spell.Modern.LEVEL_1_ENCHANT,
+                    LEVEL_1_ENCHANT_CHILD,
                     "Staff of water",
                     "Sapphire ring",
                     "Ring of recoil",
@@ -70,6 +78,7 @@ public class EnchantJewelleryProfitScript extends Script {
                     "Jade amulets",
                     27,
                     Spell.Modern.LEVEL_2_ENCHANT,
+                    LEVEL_2_ENCHANT_CHILD,
                     "Staff of air",
                     "Jade amulet",
                     "Amulet of chemistry",
@@ -83,6 +92,7 @@ public class EnchantJewelleryProfitScript extends Script {
                     "Topaz bracelets",
                     49,
                     Spell.Modern.LEVEL_3_ENCHANT,
+                    LEVEL_3_ENCHANT_CHILD,
                     "Staff of fire",
                     "Topaz bracelet",
                     "Bracelet of slaughter",
@@ -580,9 +590,9 @@ public class EnchantJewelleryProfitScript extends Script {
         int beforeInput = ctx.inventory().getCount(method.inputItem);
         int beforeOutput = ctx.inventory().getCount(method.outputItem);
         stats.setStatus("Enchanting " + method.inputItem + " -> " + method.outputItem);
-        boolean cast = ctx.magic().cast(method.spell, method.inputItem);
+        boolean cast = selectSpellAndClickItem(ctx, method);
         if (!cast) {
-            cast = selectSpellAndClickItem(ctx, method);
+            cast = ctx.magic().cast(method.spell, method.inputItem);
         }
 
         Time.sleep(
@@ -612,10 +622,14 @@ public class EnchantJewelleryProfitScript extends Script {
 
     private boolean selectSpellAndClickItem(APIContext ctx, EnchantMethod method) {
         if (!ctx.magic().isSpellSelected()) {
-            if (!ctx.magic().cast(method.spell)) {
+            if (!selectJewelleryEnchantSpell(ctx, method)) {
                 return false;
             }
             Time.sleep(400, 700, () -> ctx.magic().isSpellSelected(), 100);
+        }
+
+        if (!openInventoryTab(ctx)) {
+            return false;
         }
 
         ItemWidget item = ctx.inventory().getItem(method.inputItem);
@@ -625,6 +639,63 @@ public class EnchantJewelleryProfitScript extends Script {
         return item.click(false)
                 || ctx.menu().interact("Cast", item, false)
                 || ctx.menu().interact("Cast", method.inputItem, item, false);
+    }
+
+    private boolean selectJewelleryEnchantSpell(APIContext ctx, EnchantMethod method) {
+        if (!openMagicTab(ctx)) {
+            return false;
+        }
+
+        if (!isVisibleWidget(ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild))) {
+            WidgetChild jewelleryEnchantments = ctx.widgets().get(SPELLBOOK_GROUP, JEWELLERY_ENCHANTMENTS_CHILD);
+            if (!isVisibleWidget(jewelleryEnchantments)) {
+                stats.setStatus("Jewellery Enchantments widget missing: 218." + JEWELLERY_ENCHANTMENTS_CHILD);
+                return false;
+            }
+
+            stats.setStatus("Opening Jewellery Enchantments");
+            clickWidgetCenter(ctx, jewelleryEnchantments);
+            Time.sleep(
+                    450,
+                    750,
+                    () -> isVisibleWidget(ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild)),
+                    100
+            );
+        }
+
+        WidgetChild spellWidget = ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild);
+        if (!isVisibleWidget(spellWidget)) {
+            stats.setStatus("Enchant widget missing: 218." + method.spellWidgetChild);
+            return false;
+        }
+
+        stats.setStatus("Selecting " + method.spell.getSpellName() + " via 218." + method.spellWidgetChild);
+        boolean clicked = clickWidgetCenter(ctx, spellWidget)
+                || spellWidget.interact("Cast")
+                || spellWidget.click();
+        Time.sleep(450, 800, () -> ctx.magic().isSpellSelected(), 100);
+        if (!ctx.magic().isSpellSelected()) {
+            stats.setStatus("Spell was not selected: 218." + method.spellWidgetChild);
+        }
+        return clicked && ctx.magic().isSpellSelected();
+    }
+
+    private boolean openMagicTab(APIContext ctx) {
+        if (ctx.tabs().isOpen(ITabsAPI.Tabs.MAGIC)) {
+            return true;
+        }
+        ctx.tabs().open(ITabsAPI.Tabs.MAGIC);
+        Time.sleep(350, 650, () -> ctx.tabs().isOpen(ITabsAPI.Tabs.MAGIC), 100);
+        return ctx.tabs().isOpen(ITabsAPI.Tabs.MAGIC);
+    }
+
+    private boolean openInventoryTab(APIContext ctx) {
+        if (ctx.tabs().isOpen(ITabsAPI.Tabs.INVENTORY)) {
+            return true;
+        }
+        ctx.tabs().open(ITabsAPI.Tabs.INVENTORY);
+        Time.sleep(350, 650, () -> ctx.tabs().isOpen(ITabsAPI.Tabs.INVENTORY), 100);
+        return ctx.tabs().isOpen(ITabsAPI.Tabs.INVENTORY);
     }
 
     private void handleGrandExchange(APIContext ctx) {
@@ -1007,6 +1078,7 @@ public class EnchantJewelleryProfitScript extends Script {
         private final String label;
         private final int requiredMagic;
         private final Spell spell;
+        private final int spellWidgetChild;
         private final String staff;
         private final String inputItem;
         private final String outputItem;
@@ -1020,6 +1092,7 @@ public class EnchantJewelleryProfitScript extends Script {
                 String label,
                 int requiredMagic,
                 Spell spell,
+                int spellWidgetChild,
                 String staff,
                 String inputItem,
                 String outputItem,
@@ -1032,6 +1105,7 @@ public class EnchantJewelleryProfitScript extends Script {
             this.label = label;
             this.requiredMagic = requiredMagic;
             this.spell = spell;
+            this.spellWidgetChild = spellWidgetChild;
             this.staff = staff;
             this.inputItem = inputItem;
             this.outputItem = outputItem;
