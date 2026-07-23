@@ -491,7 +491,6 @@ public class EnchantJewelleryProfitScript extends Script {
             return;
         }
 
-        withdrawCoinsForGe(ctx, cost);
         if (inputsToBuy > 0) {
             queueSupplyBuy(ctx, method.inputItem, inputsToBuy, pricing.quickBuyPrice(ctx, method.inputItem, activeQuote.inputBuyPrice));
         }
@@ -888,21 +887,6 @@ public class EnchantJewelleryProfitScript extends Script {
         stats.setStatus(status);
         ctx.bank().close();
         Time.sleep(500, 900, () -> !ctx.bank().isOpen(), 100);
-    }
-
-    private void withdrawCoinsForGe(APIContext ctx, long coinsNeeded) {
-        int inventoryCoins = ctx.inventory().getCount(true, COINS);
-        int bankCoins = ctx.bank().getCount(COINS);
-        int targetInventoryCoins = clampToInt(Math.min(Integer.MAX_VALUE, coinsNeeded));
-        if (inventoryCoins >= targetInventoryCoins || bankCoins <= 0) {
-            return;
-        }
-
-        int toWithdraw = Math.min(targetInventoryCoins - inventoryCoins, bankCoins);
-        stats.setStatus("Withdrawing " + toWithdraw + " coins for GE");
-        ctx.bank().selectWithdrawMode(IBankAPI.WithdrawMode.ITEM);
-        ctx.bank().withdraw(toWithdraw, COINS);
-        Time.sleep(600, 900);
     }
 
     private boolean inventoryOnlyContains(APIContext ctx, String... names) {
