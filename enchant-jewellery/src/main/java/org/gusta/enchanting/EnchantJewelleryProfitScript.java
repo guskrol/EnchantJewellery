@@ -31,7 +31,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.0-random-enchants";
+    private static final String SCRIPT_VERSION = "v0.1.1-widget-enchants";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -578,14 +578,6 @@ public class EnchantJewelleryProfitScript extends Script {
             return;
         }
 
-        if (!ctx.magic().canCast(method.spell)) {
-            stats.setStatus("Cannot cast " + method.spell.getSpellName() + "; refreshing setup");
-            activeMethod = null;
-            activeQuote = null;
-            Time.sleep(900, 1400);
-            return;
-        }
-
         int beforeInput = ctx.inventory().getCount(method.inputItem);
         int beforeOutput = ctx.inventory().getCount(method.outputItem);
         stats.setStatus("Enchanting " + method.inputItem + " -> " + method.outputItem);
@@ -645,23 +637,40 @@ public class EnchantJewelleryProfitScript extends Script {
             return false;
         }
 
-        if (!isVisibleWidget(ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild))) {
+        if (!openJewelleryEnchantments(ctx, method)) {
+            return false;
+        }
+
+        return clickEnchantSpellWidget(ctx, method);
+    }
+
+    private boolean openJewelleryEnchantments(APIContext ctx, EnchantMethod method) {
+        for (int attempt = 1; attempt <= 2; attempt++) {
             WidgetChild jewelleryEnchantments = ctx.widgets().get(SPELLBOOK_GROUP, JEWELLERY_ENCHANTMENTS_CHILD);
             if (!isVisibleWidget(jewelleryEnchantments)) {
                 stats.setStatus("Jewellery Enchantments widget missing: 218." + JEWELLERY_ENCHANTMENTS_CHILD);
                 return false;
             }
 
-            stats.setStatus("Opening Jewellery Enchantments");
-            clickWidgetCenter(ctx, jewelleryEnchantments);
+            stats.setStatus("Opening Jewellery Enchantments via 218." + JEWELLERY_ENCHANTMENTS_CHILD);
+            clickWidgetActions(ctx, jewelleryEnchantments, "Open", "View", "Cast");
             Time.sleep(
                     450,
                     750,
                     () -> isVisibleWidget(ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild)),
                     100
             );
+
+            if (isVisibleWidget(ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild))) {
+                return true;
+            }
         }
 
+        stats.setStatus("Enchant widget missing after opening: 218." + method.spellWidgetChild);
+        return false;
+    }
+
+    private boolean clickEnchantSpellWidget(APIContext ctx, EnchantMethod method) {
         WidgetChild spellWidget = ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild);
         if (!isVisibleWidget(spellWidget)) {
             stats.setStatus("Enchant widget missing: 218." + method.spellWidgetChild);
@@ -669,14 +678,37 @@ public class EnchantJewelleryProfitScript extends Script {
         }
 
         stats.setStatus("Selecting " + method.spell.getSpellName() + " via 218." + method.spellWidgetChild);
-        boolean clicked = clickWidgetCenter(ctx, spellWidget)
-                || spellWidget.interact("Cast")
-                || spellWidget.click();
-        Time.sleep(450, 800, () -> ctx.magic().isSpellSelected(), 100);
+        boolean clicked = clickWidgetActions(ctx, spellWidget, "Cast", method.spell.getSpellName());
+        Time.sleep(550, 900, () -> ctx.magic().isSpellSelected(), 100);
+
+        if (!ctx.magic().isSpellSelected()) {
+            clicked = clickWidgetCenter(ctx, spellWidget) || clicked;
+            Time.sleep(550, 900, () -> ctx.magic().isSpellSelected(), 100);
+        }
+
+        if (!ctx.magic().isSpellSelected()) {
+            clicked = spellWidget.click() || clicked;
+            Time.sleep(550, 900, () -> ctx.magic().isSpellSelected(), 100);
+        }
+
         if (!ctx.magic().isSpellSelected()) {
             stats.setStatus("Spell was not selected: 218." + method.spellWidgetChild);
         }
         return clicked && ctx.magic().isSpellSelected();
+    }
+
+    private boolean clickWidgetActions(APIContext ctx, WidgetChild widget, String... actions) {
+        if (!isVisibleWidget(widget)) {
+            return false;
+        }
+
+        for (String action : actions) {
+            if (action != null && !action.isBlank() && widget.interact(action)) {
+                return true;
+            }
+        }
+
+        return clickWidgetCenter(ctx, widget) || widget.click();
     }
 
     private boolean openMagicTab(APIContext ctx) {
