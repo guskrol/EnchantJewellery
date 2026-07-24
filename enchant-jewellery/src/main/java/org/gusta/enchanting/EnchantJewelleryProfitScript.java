@@ -44,7 +44,7 @@ import java.util.function.IntSupplier;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.7-live-diagnostics";
+    private static final String SCRIPT_VERSION = "v0.1.8-safe-magic-widget-clicks";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -791,6 +791,15 @@ public class EnchantJewelleryProfitScript extends Script {
     }
 
     private boolean openJewelleryEnchantments(APIContext ctx, EnchantMethod method) {
+        WidgetChild alreadyVisible = ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild);
+        if (isVisibleWidget(alreadyVisible)) {
+            logDiagnostic("Jewellery menu already open; expected enchant visible child=218."
+                    + method.spellWidgetChild
+                    + " widget=" + widgetSummary(alreadyVisible)
+                    + " vars=" + varsSnapshot(ctx));
+            return true;
+        }
+
         for (int attempt = 1; attempt <= 2; attempt++) {
             WidgetChild jewelleryEnchantments = ctx.widgets().get(SPELLBOOK_GROUP, JEWELLERY_ENCHANTMENTS_CHILD);
             if (!isVisibleWidget(jewelleryEnchantments)) {
@@ -804,7 +813,8 @@ public class EnchantJewelleryProfitScript extends Script {
                     + " widget=" + widgetSummary(jewelleryEnchantments)
                     + " vars=" + varsSnapshot(ctx));
             humanWidgetPause();
-            boolean opened = clickWidgetActions(ctx, jewelleryEnchantments, "Open", "View", "Cast");
+            boolean opened = clickMagicWidgetByMouse(ctx, jewelleryEnchantments, "jewellery-menu-218."
+                    + JEWELLERY_ENCHANTMENTS_CHILD);
             Time.sleep(
                     HUMAN_WIDGET_MIN_MS,
                     HUMAN_WIDGET_MAX_MS,
@@ -849,18 +859,13 @@ public class EnchantJewelleryProfitScript extends Script {
                 + " widget=" + widgetSummary(spellWidget)
                 + " varsBefore=" + varsSnapshot(ctx));
         humanWidgetPause();
-        boolean clicked = clickWidgetActions(ctx, spellWidget, "Cast", method.spell.getSpellName());
+        boolean clicked = clickMagicWidgetByMouse(ctx, spellWidget, "spell-218." + method.spellWidgetChild);
         Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.magic().isSpellSelected(), 100);
 
         if (!ctx.magic().isSpellSelected()) {
             humanWidgetPause();
-            clicked = clickWidgetCenter(ctx, spellWidget) || clicked;
-            Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.magic().isSpellSelected(), 100);
-        }
-
-        if (!ctx.magic().isSpellSelected()) {
-            humanWidgetPause();
-            clicked = spellWidget.click() || clicked;
+            clicked = clickMagicWidgetByMouse(ctx, spellWidget, "spell-retry-218." + method.spellWidgetChild)
+                    || clicked;
             Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.magic().isSpellSelected(), 100);
         }
 
@@ -1496,11 +1501,68 @@ public class EnchantJewelleryProfitScript extends Script {
     }
 
     private boolean clickWidgetCenter(APIContext ctx, WidgetChild widget) {
+        return clickWidgetByMouse(ctx, widget, "generic-widget", false);
+    }
+
+    private boolean clickMagicWidgetByMouse(APIContext ctx, WidgetChild widget, String label) {
+        return clickWidgetByMouse(ctx, widget, label, true);
+    }
+
+    private boolean clickWidgetByMouse(APIContext ctx, WidgetChild widget, String label, boolean diagnostic) {
         if (!isVisibleWidget(widget)) {
+            if (diagnostic) {
+                logDiagnostic("Mouse widget click skipped; not visible label=" + label);
+            }
             return false;
         }
-        Point point = widget.getCentralPoint();
-        return point != null && ctx.mouse().click(point, false);
+
+        Rectangle bounds = widget.getBounds();
+        if (bounds == null || bounds.width <= 0 || bounds.height <= 0) {
+            if (diagnostic) {
+                logDiagnostic("Mouse widget click skipped; bad bounds label=" + label
+                        + " bounds=" + bounds);
+            }
+            return false;
+        }
+
+        Point point = randomPointInside(bounds);
+        if (diagnostic) {
+            logDiagnostic("Mouse widget click pending label=" + label
+                    + " point=" + point
+                    + " bounds=" + bounds);
+        }
+
+        boolean clicked = ctx.mouse().click(point, false);
+        Time.sleep(180, 360);
+
+        if (diagnostic) {
+            logDiagnostic("Mouse widget click completed label=" + label
+                    + " clicked=" + clicked
+                    + " point=" + point);
+        }
+        return clicked;
+    }
+
+    private Point randomPointInside(Rectangle bounds) {
+        int marginX = bounds.width >= 12 ? 4 : Math.max(0, bounds.width / 4);
+        int marginY = bounds.height >= 12 ? 4 : Math.max(0, bounds.height / 4);
+        int left = bounds.x + marginX;
+        int right = bounds.x + bounds.width - marginX - 1;
+        int top = bounds.y + marginY;
+        int bottom = bounds.y + bounds.height - marginY - 1;
+
+        if (right < left) {
+            left = bounds.x + bounds.width / 2;
+            right = left;
+        }
+        if (bottom < top) {
+            top = bounds.y + bounds.height / 2;
+            bottom = top;
+        }
+
+        int x = left == right ? left : ThreadLocalRandom.current().nextInt(left, right + 1);
+        int y = top == bottom ? top : ThreadLocalRandom.current().nextInt(top, bottom + 1);
+        return new Point(x, y);
     }
 
     private boolean isVisibleWidget(WidgetChild widget) {
