@@ -31,7 +31,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.2-inventory-batches";
+    private static final String SCRIPT_VERSION = "v0.1.3-slower-widget-flow";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -46,6 +46,10 @@ public class EnchantJewelleryProfitScript extends Script {
     private static final int RESTOCK_MIN_CASTS = 540;
     private static final int RESTOCK_MAX_CASTS = 1080;
     private static final long ENCHANT_BATCH_STALL_MS = 15_000L;
+    private static final int HUMAN_WIDGET_MIN_MS = 900;
+    private static final int HUMAN_WIDGET_MAX_MS = 1_650;
+    private static final int HUMAN_ITEM_MIN_MS = 700;
+    private static final int HUMAN_ITEM_MAX_MS = 1_350;
     private static final int SPELLBOOK_GROUP = 218;
     private static final int JEWELLERY_ENCHANTMENTS_CHILD = 15;
     private static final int LEVEL_1_ENCHANT_CHILD = 16;
@@ -702,20 +706,15 @@ public class EnchantJewelleryProfitScript extends Script {
             if (!selectJewelleryEnchantSpell(ctx, method)) {
                 return false;
             }
-            Time.sleep(400, 700, () -> ctx.magic().isSpellSelected(), 100);
+            humanWidgetPause();
         }
 
         if (!openInventoryTab(ctx)) {
             return false;
         }
+        humanItemPause();
 
-        ItemWidget item = ctx.inventory().getItem(method.inputItem);
-        if (item == null) {
-            return false;
-        }
-        return item.click(false)
-                || ctx.menu().interact("Cast", item, false)
-                || ctx.menu().interact("Cast", method.inputItem, item, false);
+        return clickEnchantMaterial(ctx, method);
     }
 
     private boolean selectJewelleryEnchantSpell(APIContext ctx, EnchantMethod method) {
@@ -739,10 +738,11 @@ public class EnchantJewelleryProfitScript extends Script {
             }
 
             stats.setStatus("Opening Jewellery Enchantments via 218." + JEWELLERY_ENCHANTMENTS_CHILD);
+            humanWidgetPause();
             clickWidgetActions(ctx, jewelleryEnchantments, "Open", "View", "Cast");
             Time.sleep(
-                    450,
-                    750,
+                    HUMAN_WIDGET_MIN_MS,
+                    HUMAN_WIDGET_MAX_MS,
                     () -> isVisibleWidget(ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild)),
                     100
             );
@@ -764,23 +764,43 @@ public class EnchantJewelleryProfitScript extends Script {
         }
 
         stats.setStatus("Selecting " + method.spell.getSpellName() + " via 218." + method.spellWidgetChild);
+        humanWidgetPause();
         boolean clicked = clickWidgetActions(ctx, spellWidget, "Cast", method.spell.getSpellName());
-        Time.sleep(550, 900, () -> ctx.magic().isSpellSelected(), 100);
+        Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.magic().isSpellSelected(), 100);
 
         if (!ctx.magic().isSpellSelected()) {
+            humanWidgetPause();
             clicked = clickWidgetCenter(ctx, spellWidget) || clicked;
-            Time.sleep(550, 900, () -> ctx.magic().isSpellSelected(), 100);
+            Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.magic().isSpellSelected(), 100);
         }
 
         if (!ctx.magic().isSpellSelected()) {
+            humanWidgetPause();
             clicked = spellWidget.click() || clicked;
-            Time.sleep(550, 900, () -> ctx.magic().isSpellSelected(), 100);
+            Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.magic().isSpellSelected(), 100);
         }
 
         if (!ctx.magic().isSpellSelected()) {
-            stats.setStatus("Spell was not selected: 218." + method.spellWidgetChild);
+            stats.setStatus("Spell selection not detected; clicking material anyway");
         }
-        return clicked && ctx.magic().isSpellSelected();
+        return clicked;
+    }
+
+    private boolean clickEnchantMaterial(APIContext ctx, EnchantMethod method) {
+        ItemWidget item = ctx.inventory().getItem(method.inputItem);
+        if (item == null) {
+            stats.setStatus("Missing material in inventory: " + method.inputItem);
+            return false;
+        }
+
+        stats.setStatus("Clicking material after spell: " + method.inputItem);
+        humanItemPause();
+        boolean clicked = ctx.menu().interact("Cast", method.inputItem, item, false)
+                || ctx.menu().interact("Cast", item, false)
+                || item.interact("Cast")
+                || item.click(false);
+        Time.sleep(HUMAN_ITEM_MIN_MS, HUMAN_ITEM_MAX_MS);
+        return clicked;
     }
 
     private boolean clickWidgetActions(APIContext ctx, WidgetChild widget, String... actions) {
@@ -801,8 +821,9 @@ public class EnchantJewelleryProfitScript extends Script {
         if (ctx.tabs().isOpen(ITabsAPI.Tabs.MAGIC)) {
             return true;
         }
+        humanWidgetPause();
         ctx.tabs().open(ITabsAPI.Tabs.MAGIC);
-        Time.sleep(350, 650, () -> ctx.tabs().isOpen(ITabsAPI.Tabs.MAGIC), 100);
+        Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.tabs().isOpen(ITabsAPI.Tabs.MAGIC), 100);
         return ctx.tabs().isOpen(ITabsAPI.Tabs.MAGIC);
     }
 
@@ -810,9 +831,18 @@ public class EnchantJewelleryProfitScript extends Script {
         if (ctx.tabs().isOpen(ITabsAPI.Tabs.INVENTORY)) {
             return true;
         }
+        humanItemPause();
         ctx.tabs().open(ITabsAPI.Tabs.INVENTORY);
-        Time.sleep(350, 650, () -> ctx.tabs().isOpen(ITabsAPI.Tabs.INVENTORY), 100);
+        Time.sleep(HUMAN_ITEM_MIN_MS, HUMAN_ITEM_MAX_MS, () -> ctx.tabs().isOpen(ITabsAPI.Tabs.INVENTORY), 100);
         return ctx.tabs().isOpen(ITabsAPI.Tabs.INVENTORY);
+    }
+
+    private void humanWidgetPause() {
+        Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS);
+    }
+
+    private void humanItemPause() {
+        Time.sleep(HUMAN_ITEM_MIN_MS, HUMAN_ITEM_MAX_MS);
     }
 
     private void handleGrandExchange(APIContext ctx) {
