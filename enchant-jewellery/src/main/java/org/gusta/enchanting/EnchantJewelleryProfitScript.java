@@ -23,16 +23,26 @@ import com.epicbot.api.shared.util.time.Time;
 import java.awt.Color;
 import java.awt.Point;
 import java.awt.Rectangle;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.13-force-second-batch-spell";
+    private static final String SCRIPT_VERSION = "v0.2.0-dynamic-wiki-prices";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -55,7 +65,10 @@ public class EnchantJewelleryProfitScript extends Script {
     private static final int SPELLBOOK_GROUP = 218;
     private static final int JEWELLERY_ENCHANTMENTS_CHILD = 15;
     private static final int LEVEL_1_ENCHANT_CHILD = 16;
+    private static final int LEVEL_2_ENCHANT_CHILD = 11;
     private static final long METHOD_REFRESH_MS = 4 * 60_000L;
+    private static final long WIKI_PRICE_REFRESH_MS = 3 * 60_000L;
+    private static final long WIKI_PRICE_STALE_MS = 12 * 60_000L;
     private static final double BUY_MARKUP = 1.10D;
     private static final double SELL_MARKDOWN = 0.98D;
     private static final double GE_TAX_RATE = 0.02D;
@@ -74,13 +87,105 @@ public class EnchantJewelleryProfitScript extends Script {
                     "Ring of recoil",
                     377,
                     830,
-                    35,
-                    5
+                    120,
+                    5,
+                    1637,
+                    2550,
+                    250,
+                    500,
+                    160,
+                    700,
+                    true
+            ),
+            new EnchantMethod(
+                    "sapphire_necklaces",
+                    "Sapphire necklaces",
+                    7,
+                    Spell.Modern.LEVEL_1_ENCHANT,
+                    LEVEL_1_ENCHANT_CHILD,
+                    "Staff of water",
+                    "Sapphire necklace",
+                    "Games necklace(8)",
+                    402,
+                    799,
+                    150,
+                    5,
+                    1656,
+                    3853,
+                    500,
+                    300,
+                    120,
+                    500,
+                    false
+            ),
+            new EnchantMethod(
+                    "opal_bracelets",
+                    "Opal bracelets",
+                    7,
+                    Spell.Modern.LEVEL_1_ENCHANT,
+                    LEVEL_1_ENCHANT_CHILD,
+                    "Staff of water",
+                    "Opal bracelet",
+                    "Expeditious bracelet",
+                    1100,
+                    1476,
+                    180,
+                    4,
+                    21117,
+                    21177,
+                    150,
+                    500,
+                    54,
+                    220,
+                    false
+            ),
+            new EnchantMethod(
+                    "opal_necklaces",
+                    "Opal necklaces",
+                    7,
+                    Spell.Modern.LEVEL_1_ENCHANT,
+                    LEVEL_1_ENCHANT_CHILD,
+                    "Staff of water",
+                    "Opal necklace",
+                    "Dodgy necklace",
+                    703,
+                    1219,
+                    180,
+                    4,
+                    21090,
+                    21143,
+                    150,
+                    300,
+                    54,
+                    220,
+                    false
+            ),
+            new EnchantMethod(
+                    "emerald_rings",
+                    "Emerald rings",
+                    27,
+                    Spell.Modern.LEVEL_2_ENCHANT,
+                    LEVEL_2_ENCHANT_CHILD,
+                    "Staff of air",
+                    "Emerald ring",
+                    "Ring of dueling(8)",
+                    558,
+                    800,
+                    90,
+                    3,
+                    1639,
+                    2552,
+                    250,
+                    500,
+                    120,
+                    400,
+                    false
             )
     };
 
     private final Queue<GeAction> pendingGeActions = new ArrayDeque<>();
     private final List<GeAction> placedGeActions = new ArrayList<>();
+    private final WikiPriceClient wikiPrices = new WikiPriceClient();
     private final Pricing pricing = new Pricing();
 
     private Stats stats;
@@ -264,6 +369,8 @@ public class EnchantJewelleryProfitScript extends Script {
 
         log("Selected enchant: " + activeMethod.label
                 + " profit/cast=" + activeQuote.profitPerCast
+                + " source=" + activeQuote.priceSource
+                + " vol1h=" + activeQuote.inputVolume1h + "/" + activeQuote.outputVolume1h
                 + " target~" + activeBatchTargetCasts);
         return true;
     }
@@ -284,7 +391,8 @@ public class EnchantJewelleryProfitScript extends Script {
             }
             Quote quote = pricing.quote(ctx, method);
             if (quote.hasPrices()
-                    && quote.profitPerCast >= Math.max(MIN_PROFIT_PER_CAST, method.minProfit)) {
+                    && quote.profitPerCast >= Math.max(MIN_PROFIT_PER_CAST, method.minProfit)
+                    && quote.passesLiquidityFilter()) {
                 quotes.add(quote);
             }
         }
@@ -455,7 +563,7 @@ public class EnchantJewelleryProfitScript extends Script {
             return;
         }
 
-        int targetCasts = ThreadLocalRandom.current().nextInt(RESTOCK_MIN_CASTS, RESTOCK_MAX_CASTS + 1);
+        int targetCasts = restockTargetCasts(activeQuote);
         int inputsAvailable = ctx.inventory().getCount(method.inputItem) + ctx.bank().getCount(method.inputItem);
         int cosmicsAvailable = ctx.inventory().getCount(true, COSMIC_RUNE) + ctx.bank().getCount(COSMIC_RUNE);
         int inputsToBuy = Math.max(0, targetCasts - inputsAvailable);
@@ -503,6 +611,23 @@ public class EnchantJewelleryProfitScript extends Script {
         pendingGeActions.add(GeAction.buy(itemName, quantity, price));
         stats.lastGeAction = "Queued buy " + quantity + "x " + itemName + " @ " + price;
         log(stats.lastGeAction);
+    }
+
+    private int restockTargetCasts(Quote quote) {
+        EnchantMethod method = quote == null ? activeMethod : quote.method;
+        if (method == null) {
+            return ThreadLocalRandom.current().nextInt(RESTOCK_MIN_CASTS, RESTOCK_MAX_CASTS + 1);
+        }
+
+        int min = Math.max(INVENTORY_INPUT_AMOUNT, method.restockMinCasts);
+        int max = Math.max(min, method.restockMaxCasts);
+        if (quote != null && quote.hasWikiVolume()) {
+            int bottleneck = Math.min(quote.inputVolume1h, quote.outputVolume1h);
+            if (bottleneck > 0) {
+                max = Math.min(max, Math.max(min, bottleneck / 2));
+            }
+        }
+        return ThreadLocalRandom.current().nextInt(min, max + 1);
     }
 
     private boolean shouldSellOutput(APIContext ctx, EnchantMethod method) {
@@ -1299,7 +1424,14 @@ public class EnchantJewelleryProfitScript extends Script {
             if (summary.length() > 0) {
                 summary.append(", ");
             }
-            summary.append(method.key).append('=').append(quote.profitPerCast);
+            summary.append(method.key)
+                    .append('=').append(quote.profitPerCast)
+                    .append("gp/")
+                    .append(quote.priceSource)
+                    .append(" v1h ")
+                    .append(quote.inputVolume1h)
+                    .append('/')
+                    .append(quote.outputVolume1h);
         }
         return summary.toString();
     }
@@ -1364,6 +1496,13 @@ public class EnchantJewelleryProfitScript extends Script {
         private final long fallbackOutputSell;
         private final int minProfit;
         private final int baseWeight;
+        private final long inputPriceId;
+        private final long outputPriceId;
+        private final int minInputVolume1h;
+        private final int minOutputVolume1h;
+        private final int restockMinCasts;
+        private final int restockMaxCasts;
+        private final boolean allowClientPriceFallback;
 
         private EnchantMethod(
                 String key,
@@ -1377,7 +1516,14 @@ public class EnchantJewelleryProfitScript extends Script {
                 long fallbackInputBuy,
                 long fallbackOutputSell,
                 int minProfit,
-                int baseWeight
+                int baseWeight,
+                long inputPriceId,
+                long outputPriceId,
+                int minInputVolume1h,
+                int minOutputVolume1h,
+                int restockMinCasts,
+                int restockMaxCasts,
+                boolean allowClientPriceFallback
         ) {
             this.key = key;
             this.label = label;
@@ -1391,11 +1537,39 @@ public class EnchantJewelleryProfitScript extends Script {
             this.fallbackOutputSell = fallbackOutputSell;
             this.minProfit = minProfit;
             this.baseWeight = baseWeight;
+            this.inputPriceId = inputPriceId;
+            this.outputPriceId = outputPriceId;
+            this.minInputVolume1h = minInputVolume1h;
+            this.minOutputVolume1h = minOutputVolume1h;
+            this.restockMinCasts = restockMinCasts;
+            this.restockMaxCasts = restockMaxCasts;
+            this.allowClientPriceFallback = allowClientPriceFallback;
         }
     }
 
     private class Pricing {
         private Quote quote(APIContext ctx, EnchantMethod method) {
+            WikiQuote wikiQuote = wikiPrices.quote(method);
+            if (wikiQuote != null) {
+                long cost = (long) wikiQuote.inputBuyPrice + wikiQuote.cosmicBuyPrice;
+                long profit = taxedSellValue(wikiQuote.outputSellPrice) - cost;
+                long profitPerHour = profit * 1600L;
+                return new Quote(
+                        method,
+                        wikiQuote.inputBuyPrice,
+                        wikiQuote.cosmicBuyPrice,
+                        wikiQuote.outputSellPrice,
+                        cost,
+                        profit,
+                        profitPerHour,
+                        wikiQuote.inputVolume1h,
+                        wikiQuote.outputVolume1h,
+                        wikiQuote.inputVolume5m,
+                        wikiQuote.outputVolume5m,
+                        "wiki"
+                );
+            }
+
             ItemDetail input = itemDetail(ctx, method.inputItem);
             ItemDetail cosmic = itemDetail(ctx, COSMIC_RUNE);
             ItemDetail output = itemDetail(ctx, method.outputItem);
@@ -1407,16 +1581,27 @@ public class EnchantJewelleryProfitScript extends Script {
                     ? Long.MIN_VALUE
                     : taxedSellValue(outputSell) - cost;
             long profitPerHour = profit == Long.MIN_VALUE ? Long.MIN_VALUE : profit * 1600L;
-            return new Quote(method, inputBuy, cosmicBuy, outputSell, cost, profit, profitPerHour);
+            return new Quote(method, inputBuy, cosmicBuy, outputSell, cost, profit, profitPerHour,
+                    0, 0, 0, 0, "client");
         }
 
         private int quickBuyPrice(APIContext ctx, String itemName, long fallbackPrice) {
+            Integer wikiBuy = wikiPrices.quickBuyPrice(itemName);
+            if (wikiBuy != null && wikiBuy > 0) {
+                return clampToInt(Math.max(1L, Math.round(Math.ceil(wikiBuy * BUY_MARKUP))));
+            }
+
             ItemDetail detail = itemDetail(ctx, itemName);
             long market = firstPositive(highPrice(detail), lowPrice(detail), fallbackPrice);
             return clampToInt(Math.max(1L, Math.round(Math.ceil(market * BUY_MARKUP))));
         }
 
         private int quickSellPrice(APIContext ctx, String itemName, long fallbackPrice) {
+            Integer wikiSell = wikiPrices.quickSellPrice(itemName);
+            if (wikiSell != null && wikiSell > 0) {
+                return clampToInt(Math.max(1L, Math.round(Math.floor(wikiSell * SELL_MARKDOWN))));
+            }
+
             ItemDetail detail = itemDetail(ctx, itemName);
             long market = firstPositive(lowPrice(detail), highPrice(detail), fallbackPrice);
             return clampToInt(Math.max(1L, Math.round(Math.floor(market * SELL_MARKDOWN))));
@@ -1457,6 +1642,273 @@ public class EnchantJewelleryProfitScript extends Script {
         }
     }
 
+    private class WikiPriceClient {
+        private static final String USER_AGENT = "EnchantJewelleryProfitScript/0.2 (github.com/guskrol/EnchantJewellery)";
+        private static final String LATEST_URL = "https://prices.runescape.wiki/api/v1/osrs/latest";
+        private static final String FIVE_MIN_URL = "https://prices.runescape.wiki/api/v1/osrs/5m";
+        private static final String ONE_HOUR_URL = "https://prices.runescape.wiki/api/v1/osrs/1h";
+        private static final long COSMIC_RUNE_ID = 564L;
+
+        private WikiSnapshot cachedSnapshot;
+        private long cachedSnapshotAt;
+
+        private WikiQuote quote(EnchantMethod method) {
+            WikiSnapshot snapshot = snapshot();
+            if (snapshot == null || method == null) {
+                return null;
+            }
+
+            WikiItemPrice input = snapshot.item(method.inputPriceId);
+            WikiItemPrice cosmic = snapshot.item(COSMIC_RUNE_ID);
+            WikiItemPrice output = snapshot.item(method.outputPriceId);
+            if (input == null || cosmic == null || output == null) {
+                return null;
+            }
+
+            int inputBuy = firstPositive(input.latestHigh, input.avgHigh5m, input.avgHigh1h, method.fallbackInputBuy);
+            int cosmicBuy = firstPositive(cosmic.latestHigh, cosmic.avgHigh5m, cosmic.avgHigh1h, 113L);
+            int outputSell = firstPositive(output.latestLow, output.avgLow5m, output.avgLow1h, method.fallbackOutputSell);
+            if (inputBuy <= 0 || cosmicBuy <= 0 || outputSell <= 0) {
+                return null;
+            }
+
+            return new WikiQuote(
+                    inputBuy,
+                    cosmicBuy,
+                    outputSell,
+                    input.highVolume1h,
+                    output.lowVolume1h,
+                    input.highVolume5m,
+                    output.lowVolume5m
+            );
+        }
+
+        private Integer quickBuyPrice(String itemName) {
+            Long itemId = priceIdForName(itemName);
+            if (itemId == null) {
+                return null;
+            }
+            WikiSnapshot snapshot = snapshot();
+            WikiItemPrice price = snapshot == null ? null : snapshot.item(itemId);
+            if (price == null) {
+                return null;
+            }
+            int value = firstPositive(price.latestHigh, price.avgHigh5m, price.avgHigh1h);
+            return value <= 0 ? null : value;
+        }
+
+        private Integer quickSellPrice(String itemName) {
+            Long itemId = priceIdForName(itemName);
+            if (itemId == null) {
+                return null;
+            }
+            WikiSnapshot snapshot = snapshot();
+            WikiItemPrice price = snapshot == null ? null : snapshot.item(itemId);
+            if (price == null) {
+                return null;
+            }
+            int value = firstPositive(price.latestLow, price.avgLow5m, price.avgLow1h);
+            return value <= 0 ? null : value;
+        }
+
+        private WikiSnapshot snapshot() {
+            long now = System.currentTimeMillis();
+            if (cachedSnapshot != null && now - cachedSnapshotAt <= WIKI_PRICE_REFRESH_MS) {
+                return cachedSnapshot;
+            }
+
+            try {
+                String latest = httpGet(LATEST_URL);
+                String fiveMinute = httpGet(FIVE_MIN_URL);
+                String oneHour = httpGet(ONE_HOUR_URL);
+                WikiSnapshot snapshot = parseSnapshot(latest, fiveMinute, oneHour);
+                if (snapshot != null) {
+                    cachedSnapshot = snapshot;
+                    cachedSnapshotAt = now;
+                    return cachedSnapshot;
+                }
+            } catch (RuntimeException | IOException ignored) {
+                // Client pricing remains as a safe fallback for the stable method.
+            }
+
+            if (cachedSnapshot != null && now - cachedSnapshotAt <= WIKI_PRICE_STALE_MS) {
+                return cachedSnapshot;
+            }
+            return null;
+        }
+
+        private String httpGet(String url) throws IOException {
+            HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("User-Agent", USER_AGENT);
+            connection.setConnectTimeout(1800);
+            connection.setReadTimeout(2200);
+
+            int status = connection.getResponseCode();
+            if (status < 200 || status >= 300) {
+                throw new IOException("Wiki Prices HTTP " + status);
+            }
+
+            StringBuilder response = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    response.append(line);
+                }
+            } finally {
+                connection.disconnect();
+            }
+            return response.toString();
+        }
+
+        private WikiSnapshot parseSnapshot(String latest, String fiveMinute, String oneHour) {
+            Map<Long, WikiItemPrice> prices = new HashMap<>();
+            for (long itemId : trackedPriceIds()) {
+                WikiItemPrice price = new WikiItemPrice();
+                parseLatest(latest, itemId, price);
+                parseAverage(fiveMinute, itemId, price, true);
+                parseAverage(oneHour, itemId, price, false);
+                prices.put(itemId, price);
+            }
+            return new WikiSnapshot(prices);
+        }
+
+        private List<Long> trackedPriceIds() {
+            List<Long> itemIds = new ArrayList<>();
+            itemIds.add(COSMIC_RUNE_ID);
+            for (EnchantMethod method : METHODS) {
+                itemIds.add(method.inputPriceId);
+                itemIds.add(method.outputPriceId);
+            }
+            return itemIds;
+        }
+
+        private void parseLatest(String json, long itemId, WikiItemPrice price) {
+            String body = itemObject(json, itemId);
+            if (body.isBlank()) {
+                return;
+            }
+            price.latestHigh = number(body, "high");
+            price.latestLow = number(body, "low");
+        }
+
+        private void parseAverage(String json, long itemId, WikiItemPrice price, boolean fiveMinute) {
+            String body = itemObject(json, itemId);
+            if (body.isBlank()) {
+                return;
+            }
+            if (fiveMinute) {
+                price.avgHigh5m = number(body, "avgHighPrice");
+                price.avgLow5m = number(body, "avgLowPrice");
+                price.highVolume5m = number(body, "highPriceVolume");
+                price.lowVolume5m = number(body, "lowPriceVolume");
+            } else {
+                price.avgHigh1h = number(body, "avgHighPrice");
+                price.avgLow1h = number(body, "avgLowPrice");
+                price.highVolume1h = number(body, "highPriceVolume");
+                price.lowVolume1h = number(body, "lowPriceVolume");
+            }
+        }
+
+        private String itemObject(String json, long itemId) {
+            if (json == null || json.isBlank()) {
+                return "";
+            }
+            Matcher matcher = Pattern.compile("\"" + itemId + "\"\\s*:\\s*\\{([^}]*)}").matcher(json);
+            return matcher.find() ? matcher.group(1) : "";
+        }
+
+        private int number(String body, String key) {
+            Matcher matcher = Pattern.compile("\"" + key + "\"\\s*:\\s*(\\d+)").matcher(body);
+            if (!matcher.find()) {
+                return 0;
+            }
+            try {
+                return clampToInt(Long.parseLong(matcher.group(1)));
+            } catch (NumberFormatException ignored) {
+                return 0;
+            }
+        }
+
+        private int firstPositive(long... values) {
+            for (long value : values) {
+                if (value > 0) {
+                    return clampToInt(value);
+                }
+            }
+            return 0;
+        }
+
+        private Long priceIdForName(String itemName) {
+            if (namesMatch(itemName, COSMIC_RUNE)) {
+                return COSMIC_RUNE_ID;
+            }
+            for (EnchantMethod method : METHODS) {
+                if (namesMatch(itemName, method.inputItem)) {
+                    return method.inputPriceId;
+                }
+                if (namesMatch(itemName, method.outputItem)) {
+                    return method.outputPriceId;
+                }
+            }
+            return null;
+        }
+    }
+
+    private static class WikiSnapshot {
+        private final Map<Long, WikiItemPrice> prices;
+
+        private WikiSnapshot(Map<Long, WikiItemPrice> prices) {
+            this.prices = prices;
+        }
+
+        private WikiItemPrice item(long itemId) {
+            return prices.get(itemId);
+        }
+    }
+
+    private static class WikiItemPrice {
+        private int latestHigh;
+        private int latestLow;
+        private int avgHigh5m;
+        private int avgLow5m;
+        private int highVolume5m;
+        private int lowVolume5m;
+        private int avgHigh1h;
+        private int avgLow1h;
+        private int highVolume1h;
+        private int lowVolume1h;
+    }
+
+    private static class WikiQuote {
+        private final int inputBuyPrice;
+        private final int cosmicBuyPrice;
+        private final int outputSellPrice;
+        private final int inputVolume1h;
+        private final int outputVolume1h;
+        private final int inputVolume5m;
+        private final int outputVolume5m;
+
+        private WikiQuote(
+                int inputBuyPrice,
+                int cosmicBuyPrice,
+                int outputSellPrice,
+                int inputVolume1h,
+                int outputVolume1h,
+                int inputVolume5m,
+                int outputVolume5m
+        ) {
+            this.inputBuyPrice = inputBuyPrice;
+            this.cosmicBuyPrice = cosmicBuyPrice;
+            this.outputSellPrice = outputSellPrice;
+            this.inputVolume1h = inputVolume1h;
+            this.outputVolume1h = outputVolume1h;
+            this.inputVolume5m = inputVolume5m;
+            this.outputVolume5m = outputVolume5m;
+        }
+    }
+
     private static class Quote {
         private final EnchantMethod method;
         private final int inputBuyPrice;
@@ -1465,6 +1917,11 @@ public class EnchantJewelleryProfitScript extends Script {
         private final long costPerCast;
         private final long profitPerCast;
         private final long profitPerHour;
+        private final int inputVolume1h;
+        private final int outputVolume1h;
+        private final int inputVolume5m;
+        private final int outputVolume5m;
+        private final String priceSource;
 
         private Quote(
                 EnchantMethod method,
@@ -1473,7 +1930,12 @@ public class EnchantJewelleryProfitScript extends Script {
                 int outputSellPrice,
                 long costPerCast,
                 long profitPerCast,
-                long profitPerHour
+                long profitPerHour,
+                int inputVolume1h,
+                int outputVolume1h,
+                int inputVolume5m,
+                int outputVolume5m,
+                String priceSource
         ) {
             this.method = method;
             this.inputBuyPrice = inputBuyPrice;
@@ -1482,6 +1944,11 @@ public class EnchantJewelleryProfitScript extends Script {
             this.costPerCast = costPerCast;
             this.profitPerCast = profitPerCast;
             this.profitPerHour = profitPerHour;
+            this.inputVolume1h = inputVolume1h;
+            this.outputVolume1h = outputVolume1h;
+            this.inputVolume5m = inputVolume5m;
+            this.outputVolume5m = outputVolume5m;
+            this.priceSource = priceSource == null ? "-" : priceSource;
         }
 
         private boolean hasPrices() {
@@ -1490,6 +1957,23 @@ public class EnchantJewelleryProfitScript extends Script {
 
         private boolean profitable() {
             return hasPrices() && profitPerCast > 0;
+        }
+
+        private boolean hasWikiVolume() {
+            return "wiki".equals(priceSource);
+        }
+
+        private boolean passesLiquidityFilter() {
+            if (!hasWikiVolume()) {
+                return method.allowClientPriceFallback;
+            }
+            if (method.allowClientPriceFallback) {
+                return true;
+            }
+            if (inputVolume1h < method.minInputVolume1h || outputVolume1h < method.minOutputVolume1h) {
+                return false;
+            }
+            return inputVolume5m > 0 || outputVolume5m > 0 || method.allowClientPriceFallback;
         }
     }
 
