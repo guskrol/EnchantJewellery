@@ -32,7 +32,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.11-direct-material-click";
+    private static final String SCRIPT_VERSION = "v0.1.12-sapphire-only";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -55,9 +55,6 @@ public class EnchantJewelleryProfitScript extends Script {
     private static final int SPELLBOOK_GROUP = 218;
     private static final int JEWELLERY_ENCHANTMENTS_CHILD = 15;
     private static final int LEVEL_1_ENCHANT_CHILD = 16;
-    private static final int LEVEL_2_ENCHANT_CHILD = 11;
-    private static final int LEVEL_3_ENCHANT_CHILD = 13;
-    private static final int LEVEL_4_ENCHANT_CHILD = 14;
     private static final long METHOD_REFRESH_MS = 4 * 60_000L;
     private static final double BUY_MARKUP = 1.10D;
     private static final double SELL_MARKDOWN = 0.98D;
@@ -79,34 +76,6 @@ public class EnchantJewelleryProfitScript extends Script {
                     830,
                     35,
                     5
-            ),
-            new EnchantMethod(
-                    "jade_amulets",
-                    "Jade amulets",
-                    27,
-                    Spell.Modern.LEVEL_2_ENCHANT,
-                    LEVEL_2_ENCHANT_CHILD,
-                    "Staff of air",
-                    "Jade amulet",
-                    "Amulet of chemistry",
-                    953,
-                    1735,
-                    80,
-                    7
-            ),
-            new EnchantMethod(
-                    "topaz_bracelets",
-                    "Topaz bracelets",
-                    49,
-                    Spell.Modern.LEVEL_3_ENCHANT,
-                    LEVEL_3_ENCHANT_CHILD,
-                    "Staff of fire",
-                    "Topaz bracelet",
-                    "Bracelet of slaughter",
-                    2771,
-                    3319,
-                    100,
-                    4
             )
     };
 

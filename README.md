@@ -1,12 +1,10 @@
 # EnchantJewellery
 
-EpicBot OSRS script for rotating profitable P2P jewellery enchants:
+EpicBot OSRS script for a focused P2P jewellery enchant:
 
 - Sapphire ring -> Ring of recoil
-- Jade amulet -> Amulet of chemistry
-- Topaz bracelet -> Bracelet of slaughter
 
-The script selects between available methods with weighted randomness, checks current GE margins, prepares inventory/bank supplies, buys missing supplies through the Grand Exchange, sells output jewellery, and paints runtime/profit status.
+The script checks current GE margins, prepares inventory/bank supplies, buys missing Sapphire rings and Cosmic runes through the Grand Exchange, sells Ring of recoil outputs, and paints runtime/profit status.
 
 ## Build
 
