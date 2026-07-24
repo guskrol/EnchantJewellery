@@ -31,7 +31,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.1-widget-enchants";
+    private static final String SCRIPT_VERSION = "v0.1.2-inventory-batches";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -45,6 +45,7 @@ public class EnchantJewelleryProfitScript extends Script {
     private static final int MAX_BATCH_CASTS = 420;
     private static final int RESTOCK_MIN_CASTS = 540;
     private static final int RESTOCK_MAX_CASTS = 1080;
+    private static final long ENCHANT_BATCH_STALL_MS = 15_000L;
     private static final int SPELLBOOK_GROUP = 218;
     private static final int JEWELLERY_ENCHANTMENTS_CHILD = 15;
     private static final int LEVEL_1_ENCHANT_CHILD = 16;
@@ -113,6 +114,11 @@ public class EnchantJewelleryProfitScript extends Script {
     private Quote activeQuote;
     private int activeBatchTargetCasts;
     private int activeBatchCasts;
+    private boolean enchantInventoryCycleActive;
+    private EnchantMethod enchantCycleMethod;
+    private int enchantCycleLastInputCount;
+    private int enchantCycleLastOutputCount;
+    private long enchantCycleLastProgressAt;
     private long nextMethodRefreshAt;
     private long nextGeCollectAt;
     private long nextIdleLogAt;
@@ -183,12 +189,14 @@ public class EnchantJewelleryProfitScript extends Script {
 
     @Override
     protected void onStop() {
+        resetEnchantCycle();
         clearClientInteractionState();
         getLogger().info("Enchant Jewellery Profit " + SCRIPT_VERSION + " stopped");
     }
 
     @Override
     protected void onPause() {
+        resetEnchantCycle();
         clearClientInteractionState();
     }
 
@@ -217,6 +225,11 @@ public class EnchantJewelleryProfitScript extends Script {
                 stats.setStatus("Closing GE before enchanting");
                 ctx.grandExchange().close();
                 Time.sleep(600, 900, () -> !ctx.grandExchange().isOpen(), 100);
+                return;
+            }
+
+            if (enchantInventoryCycleActive && activeMethod != null) {
+                enchantInventory(ctx, activeMethod);
                 return;
             }
 
@@ -264,6 +277,7 @@ public class EnchantJewelleryProfitScript extends Script {
         activeQuote = selected;
         activeBatchTargetCasts = ThreadLocalRandom.current().nextInt(MIN_BATCH_CASTS, MAX_BATCH_CASTS + 1);
         activeBatchCasts = 0;
+        resetEnchantCycle();
         nextMethodRefreshAt = now + METHOD_REFRESH_MS;
 
         log("Selected enchant: " + activeMethod.label
@@ -565,6 +579,10 @@ public class EnchantJewelleryProfitScript extends Script {
             return;
         }
 
+        if (handleActiveEnchantCycle(ctx, method)) {
+            return;
+        }
+
         if (ctx.localPlayer().isMoving() || ctx.localPlayer().isAnimating()) {
             stats.setStatus(method.label + " enchanting in progress");
             Time.sleep(500, 800);
@@ -580,15 +598,12 @@ public class EnchantJewelleryProfitScript extends Script {
 
         int beforeInput = ctx.inventory().getCount(method.inputItem);
         int beforeOutput = ctx.inventory().getCount(method.outputItem);
-        stats.setStatus("Enchanting " + method.inputItem + " -> " + method.outputItem);
+        stats.setStatus("Starting inventory enchant: " + method.inputItem + " -> " + method.outputItem);
         boolean cast = selectSpellAndClickItem(ctx, method);
-        if (!cast) {
-            cast = ctx.magic().cast(method.spell, method.inputItem);
-        }
 
         Time.sleep(
-                700,
-                1300,
+                900,
+                1600,
                 () -> ctx.inventory().getCount(method.inputItem) < beforeInput
                         || ctx.inventory().getCount(method.outputItem) > beforeOutput
                         || ctx.localPlayer().isAnimating(),
@@ -602,6 +617,13 @@ public class EnchantJewelleryProfitScript extends Script {
         if (converted > 0) {
             stats.casts += converted;
             activeBatchCasts += converted;
+        }
+
+        int currentInput = ctx.inventory().getCount(method.inputItem);
+        int currentOutput = ctx.inventory().getCount(method.outputItem);
+        if (cast || converted > 0 || ctx.localPlayer().isAnimating()) {
+            startEnchantCycle(method, currentInput, currentOutput);
+            stats.setStatus("Enchanting inventory: " + currentInput + " " + method.inputItem + " left");
             return;
         }
 
@@ -609,6 +631,70 @@ public class EnchantJewelleryProfitScript extends Script {
             stats.setStatus("Enchant cast did not start for " + method.label);
         }
         Time.sleep(600, 900);
+    }
+
+    private boolean handleActiveEnchantCycle(APIContext ctx, EnchantMethod method) {
+        if (!enchantInventoryCycleActive) {
+            return false;
+        }
+
+        if (enchantCycleMethod == null || !enchantCycleMethod.key.equals(method.key)) {
+            resetEnchantCycle();
+            return false;
+        }
+
+        int currentInput = ctx.inventory().getCount(method.inputItem);
+        int currentOutput = ctx.inventory().getCount(method.outputItem);
+        recordEnchantCycleProgress(currentInput, currentOutput);
+
+        if (currentInput <= 0) {
+            stats.setStatus("Inventory finished; banking " + method.outputItem);
+            resetEnchantCycle();
+            Time.sleep(350, 650);
+            return true;
+        }
+
+        long idleMs = System.currentTimeMillis() - enchantCycleLastProgressAt;
+        if (idleMs > ENCHANT_BATCH_STALL_MS && !ctx.localPlayer().isAnimating()) {
+            stats.setStatus("Enchant batch stalled; restarting " + method.label);
+            resetEnchantCycle();
+            Time.sleep(500, 800);
+            return false;
+        }
+
+        stats.setStatus("Enchanting inventory: " + currentInput + " " + method.inputItem + " left");
+        Time.sleep(700, 1100);
+        return true;
+    }
+
+    private void startEnchantCycle(EnchantMethod method, int currentInput, int currentOutput) {
+        enchantInventoryCycleActive = currentInput > 0;
+        enchantCycleMethod = enchantInventoryCycleActive ? method : null;
+        enchantCycleLastInputCount = currentInput;
+        enchantCycleLastOutputCount = currentOutput;
+        enchantCycleLastProgressAt = System.currentTimeMillis();
+    }
+
+    private void recordEnchantCycleProgress(int currentInput, int currentOutput) {
+        int converted = Math.max(
+                enchantCycleLastInputCount - currentInput,
+                currentOutput - enchantCycleLastOutputCount
+        );
+        if (converted > 0) {
+            stats.casts += converted;
+            activeBatchCasts += converted;
+            enchantCycleLastInputCount = currentInput;
+            enchantCycleLastOutputCount = currentOutput;
+            enchantCycleLastProgressAt = System.currentTimeMillis();
+        }
+    }
+
+    private void resetEnchantCycle() {
+        enchantInventoryCycleActive = false;
+        enchantCycleMethod = null;
+        enchantCycleLastInputCount = 0;
+        enchantCycleLastOutputCount = 0;
+        enchantCycleLastProgressAt = 0L;
     }
 
     private boolean selectSpellAndClickItem(APIContext ctx, EnchantMethod method) {
