@@ -44,7 +44,7 @@ import java.util.function.IntSupplier;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.6-watchdog-diagnostics";
+    private static final String SCRIPT_VERSION = "v0.1.7-live-diagnostics";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -152,14 +152,21 @@ public class EnchantJewelleryProfitScript extends Script {
     private long nextGeCollectAt;
     private long nextIdleLogAt;
     private long nextRowTeleportAttemptAt;
+    private Path liveDiagnosticPath;
+    private String liveDiagnosticFileName;
+    private boolean liveDiagnosticUnavailable;
     private boolean stoppedForNoProfit;
 
     @Override
     public boolean onStart(String... args) {
         stats = new Stats();
+        resetLiveDiagnosticLog();
         watchdog.reset();
         addTask(new EnchantTask());
+        appendLiveDiagnostic("START version=" + SCRIPT_VERSION
+                + " cwd=" + System.getProperty("user.dir", "."));
         log("Enchant Jewellery Profit " + SCRIPT_VERSION + " started");
+        logDiagnostic("Live diagnostic log=" + liveDiagnosticPathText());
         return true;
     }
 
@@ -170,6 +177,7 @@ public class EnchantJewelleryProfitScript extends Script {
         }
         String message = event.getMessage();
         stats.lastChat = message;
+        appendLiveDiagnostic("CHAT " + oneLine(message));
         String lower = message.toLowerCase();
         if (lower.contains("you do not have enough")
                 || lower.contains("not enough")
@@ -223,6 +231,9 @@ public class EnchantJewelleryProfitScript extends Script {
         resetEnchantCycle();
         watchdog.reset();
         clearClientInteractionState();
+        appendLiveDiagnostic("STOP version=" + SCRIPT_VERSION
+                + " runtime=" + (stats == null ? "-" : stats.runtimeText())
+                + " status=" + (stats == null ? "-" : stats.status));
         getLogger().info("Enchant Jewellery Profit " + SCRIPT_VERSION + " stopped");
     }
 
@@ -231,6 +242,7 @@ public class EnchantJewelleryProfitScript extends Script {
         resetEnchantCycle();
         watchdog.reset();
         clearClientInteractionState();
+        appendLiveDiagnostic("PAUSE status=" + (stats == null ? "-" : stats.status));
     }
 
     private class EnchantTask implements ScriptTask {
@@ -1284,6 +1296,7 @@ public class EnchantJewelleryProfitScript extends Script {
         if (stats != null) {
             stats.recordEvent(full);
         }
+        appendLiveDiagnostic(full);
         getLogger().info(full);
     }
 
@@ -1549,7 +1562,95 @@ public class EnchantJewelleryProfitScript extends Script {
             stats.setStatus(message);
             stats.recordEvent("LOG " + message);
         }
+        appendLiveDiagnostic("LOG " + oneLine(message));
         getLogger().info(message);
+    }
+
+    private void resetLiveDiagnosticLog() {
+        liveDiagnosticPath = null;
+        liveDiagnosticFileName = liveDiagnosticLogFileName();
+        liveDiagnosticUnavailable = false;
+    }
+
+    private void appendLiveDiagnostic(String message) {
+        if (liveDiagnosticUnavailable) {
+            return;
+        }
+
+        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS"));
+        String line = timestamp + " " + oneLine(message) + System.lineSeparator();
+        try {
+            writeLiveDiagnosticLine(resolveLiveDiagnosticPath(), line);
+        } catch (RuntimeException | IOException firstFailure) {
+            try {
+                liveDiagnosticPath = null;
+                writeLiveDiagnosticLine(createLiveDiagnosticPath(fallbackLiveDiagnosticPath()), line);
+            } catch (RuntimeException | IOException secondFailure) {
+                liveDiagnosticUnavailable = true;
+                getLogger().info("Live diagnostic log unavailable: " + secondFailure.getMessage()
+                        + " (primary failure: " + firstFailure.getMessage() + ")");
+            }
+        }
+    }
+
+    private Path resolveLiveDiagnosticPath() throws IOException {
+        if (liveDiagnosticPath != null) {
+            return liveDiagnosticPath;
+        }
+
+        try {
+            return createLiveDiagnosticPath(Path.of(
+                    System.getProperty("user.dir", "."),
+                    "live-logs",
+                    liveDiagnosticFileName
+            ));
+        } catch (RuntimeException | IOException firstFailure) {
+            return createLiveDiagnosticPath(fallbackLiveDiagnosticPath());
+        }
+    }
+
+    private Path createLiveDiagnosticPath(Path path) throws IOException {
+        Files.createDirectories(path.getParent());
+        liveDiagnosticPath = path;
+        return path;
+    }
+
+    private void writeLiveDiagnosticLine(Path path, String line) throws IOException {
+        Files.writeString(
+                path,
+                line,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.APPEND
+        );
+    }
+
+    private Path fallbackLiveDiagnosticPath() {
+        return Path.of(
+                System.getProperty("user.home", "."),
+                "enchant-jewellery-live-logs",
+                liveDiagnosticFileName
+        );
+    }
+
+    private String liveDiagnosticPathText() {
+        if (liveDiagnosticPath != null) {
+            return liveDiagnosticPath.toString();
+        }
+        return liveDiagnosticUnavailable ? "unavailable" : "pending";
+    }
+
+    private String liveDiagnosticLogFileName() {
+        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+        return "enchant-jewellery-live-" + timestamp + ".txt";
+    }
+
+    private String oneLine(String value) {
+        return value == null
+                ? "-"
+                : value.replace('\r', ' ')
+                .replace('\n', ' ')
+                .replaceAll("\\s+", " ")
+                .trim();
     }
 
     private void logOccasionally(String message) {
