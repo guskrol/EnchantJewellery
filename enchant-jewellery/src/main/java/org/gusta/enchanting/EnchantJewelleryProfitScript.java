@@ -44,7 +44,8 @@ import java.util.function.IntSupplier;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.8-safe-magic-widget-clicks";
+    private static final String SCRIPT_VERSION = "v0.1.9-light-watchdog";
+    private static final boolean VERBOSE_ENCHANT_DIAGNOSTICS = false;
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -795,8 +796,7 @@ public class EnchantJewelleryProfitScript extends Script {
         if (isVisibleWidget(alreadyVisible)) {
             logDiagnostic("Jewellery menu already open; expected enchant visible child=218."
                     + method.spellWidgetChild
-                    + " widget=" + widgetSummary(alreadyVisible)
-                    + " vars=" + varsSnapshot(ctx));
+                    + " bounds=" + alreadyVisible.getBounds());
             return true;
         }
 
@@ -810,8 +810,7 @@ public class EnchantJewelleryProfitScript extends Script {
 
             stats.setStatus("Opening Jewellery Enchantments via 218." + JEWELLERY_ENCHANTMENTS_CHILD);
             logDiagnostic("Opening jewellery widget attempt=" + attempt
-                    + " widget=" + widgetSummary(jewelleryEnchantments)
-                    + " vars=" + varsSnapshot(ctx));
+                    + " child=218." + JEWELLERY_ENCHANTMENTS_CHILD);
             humanWidgetPause();
             boolean opened = clickMagicWidgetByMouse(ctx, jewelleryEnchantments, "jewellery-menu-218."
                     + JEWELLERY_ENCHANTMENTS_CHILD);
@@ -823,8 +822,7 @@ public class EnchantJewelleryProfitScript extends Script {
             );
             logDiagnostic("Jewellery widget clicked=" + opened
                     + " expectedChild=" + method.spellWidgetChild
-                    + " visible=" + isVisibleWidget(ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild))
-                    + " vars=" + varsSnapshot(ctx));
+                    + " visible=" + isVisibleWidget(ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild)));
 
             if (isVisibleWidget(ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild))) {
                 return true;
@@ -848,16 +846,14 @@ public class EnchantJewelleryProfitScript extends Script {
             stats.setStatus("Wrong enchant widget at 218." + method.spellWidgetChild
                     + "; expected " + method.expectedSpellText);
             logDiagnostic("Wrong enchant widget. expected=" + method.expectedSpellText
-                    + " actual=" + widgetSummary(spellWidget)
-                    + " vars=" + varsSnapshot(ctx));
+                    + " actual=" + widgetSummary(spellWidget));
             dumpSpellbookWidgets(ctx, "wrong-enchant-widget");
             return false;
         }
 
         stats.setStatus("Selecting " + method.spell.getSpellName() + " via 218." + method.spellWidgetChild);
         logDiagnostic("Clicking enchant widget expected=" + method.expectedSpellText
-                + " widget=" + widgetSummary(spellWidget)
-                + " varsBefore=" + varsSnapshot(ctx));
+                + " child=218." + method.spellWidgetChild);
         humanWidgetPause();
         boolean clicked = clickMagicWidgetByMouse(ctx, spellWidget, "spell-218." + method.spellWidgetChild);
         Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.magic().isSpellSelected(), 100);
@@ -873,8 +869,7 @@ public class EnchantJewelleryProfitScript extends Script {
             stats.setStatus("Spell selection not detected; clicking material anyway");
         }
         logDiagnostic("Enchant widget click result=" + clicked
-                + " spellSelected=" + ctx.magic().isSpellSelected()
-                + " varsAfter=" + varsSnapshot(ctx));
+                + " spellSelected=" + ctx.magic().isSpellSelected());
         return clicked;
     }
 
@@ -883,8 +878,7 @@ public class EnchantJewelleryProfitScript extends Script {
         if (item == null) {
             stats.setStatus("Missing material in inventory: " + method.inputItem);
             logDiagnostic("Material missing before click: " + method.inputItem
-                    + " inventory=" + itemSummary(ctx.inventory().getItems())
-                    + " vars=" + varsSnapshot(ctx));
+                    + " inventory=" + itemSummary(ctx.inventory().getItems()));
             return false;
         }
 
@@ -892,8 +886,7 @@ public class EnchantJewelleryProfitScript extends Script {
         logDiagnostic("Clicking material item=" + itemSummary(item)
                 + " method=" + method.key
                 + " spellSelected=" + ctx.magic().isSpellSelected()
-                + " itemSelected=" + ctx.inventory().isItemSelected()
-                + " varsBefore=" + varsSnapshot(ctx));
+                + " itemSelected=" + ctx.inventory().isItemSelected());
         humanItemPause();
         boolean clicked = ctx.menu().interact("Cast", method.inputItem, item, false)
                 || ctx.menu().interact("Cast", item, false)
@@ -903,8 +896,7 @@ public class EnchantJewelleryProfitScript extends Script {
         logDiagnostic("Material click result=" + clicked
                 + " inputCount=" + ctx.inventory().getCount(method.inputItem)
                 + " outputCount=" + ctx.inventory().getCount(method.outputItem)
-                + " animating=" + ctx.localPlayer().isAnimating()
-                + " varsAfter=" + varsSnapshot(ctx));
+                + " animating=" + ctx.localPlayer().isAnimating());
         return clicked;
     }
 
@@ -1285,15 +1277,18 @@ public class EnchantJewelleryProfitScript extends Script {
     }
 
     private void traceEnchant(String phase, APIContext ctx, EnchantMethod method) {
-        logDiagnostic("phase=" + phase
+        String message = "phase=" + phase
                 + " method=" + (method == null ? "-" : method.key)
                 + " status='" + (stats == null ? "-" : stats.status) + "'"
                 + " counts=" + enchantCounts(ctx, method)
                 + " selectedSpell=" + safeBool(() -> ctx.magic().isSpellSelected())
                 + " selectedItem=" + safeBool(() -> ctx.inventory().isItemSelected())
                 + " tabsMagic=" + safeBool(() -> ctx.tabs().isOpen(ITabsAPI.Tabs.MAGIC))
-                + " tabsInv=" + safeBool(() -> ctx.tabs().isOpen(ITabsAPI.Tabs.INVENTORY))
-                + " vars=" + varsSnapshot(ctx));
+                + " tabsInv=" + safeBool(() -> ctx.tabs().isOpen(ITabsAPI.Tabs.INVENTORY));
+        if (VERBOSE_ENCHANT_DIAGNOSTICS) {
+            message += " vars=" + varsSnapshot(ctx);
+        }
+        logDiagnostic(message);
     }
 
     private void logDiagnostic(String message) {
@@ -1357,7 +1352,7 @@ public class EnchantJewelleryProfitScript extends Script {
         }
 
         logDiagnostic("Spellbook widget dump reason=" + reason
-                + " vars=" + varsSnapshot(ctx)
+                + " vars=" + (VERBOSE_ENCHANT_DIAGNOSTICS ? varsSnapshot(ctx) : "disabled")
                 + " widgets=" + shortText(summary.toString(), 2400));
     }
 
@@ -1386,7 +1381,6 @@ public class EnchantJewelleryProfitScript extends Script {
                 + ",child=" + safeInt(widget::getChildId)
                 + ",idx=" + safeInt(widget::getIndex)
                 + ",text='" + text + "'"
-                + ",actions=" + shortText(String.valueOf(widget.getActions()), 90)
                 + ",itemId=" + safeInt(widget::getItemId)
                 + ",modelId=" + safeInt(widget::getModelId)
                 + ",bounds=" + widget.getBounds()
@@ -1402,7 +1396,6 @@ public class EnchantJewelleryProfitScript extends Script {
                 + ",idx=" + safeInt(item::getIndex)
                 + ",stack=" + safeInt(item::getStackSize)
                 + ",noted=" + safeBool(item::isNoted)
-                + ",actions=" + shortText(String.valueOf(item.getActions()), 90)
                 + ",bounds=" + item.getBounds()
                 + "}";
     }
@@ -1774,12 +1767,16 @@ public class EnchantJewelleryProfitScript extends Script {
                 return triggered;
             }
 
+            long now = System.currentTimeMillis();
+            if (now - startedAt < WATCHDOG_WARMUP_MS) {
+                return false;
+            }
+
             if (!safeBool(() -> ctx.client().isLoggedIn())) {
                 trigger(ctx, "Watchdog stop: client is already logged out while script is active", false);
                 return true;
             }
 
-            long now = System.currentTimeMillis();
             WatchdogSnapshot current = captureWatchdogSnapshot(ctx);
             if (lastProgressSnapshot == null || current.hasMaterialProgressSince(lastProgressSnapshot)) {
                 initialize(now, current);
@@ -1787,9 +1784,6 @@ public class EnchantJewelleryProfitScript extends Script {
             }
 
             updateStableState(ctx, now, current);
-            if (now - startedAt < WATCHDOG_WARMUP_MS) {
-                return false;
-            }
 
             long noProgressFor = now - lastProgressAt;
             long sameTileFor = now - sameTileSince;
@@ -1802,8 +1796,7 @@ public class EnchantJewelleryProfitScript extends Script {
                     || safeBool(() -> ctx.grandExchange().isOpen())
                     || safeBool(() -> ctx.menu().isOpen())
                     || safeBool(() -> ctx.dialogues().isDialogueOpen())
-                    || safeBool(() -> ctx.inventory().isItemSelected())
-                    || safeBool(() -> ctx.widgets().isInterfaceOpen());
+                    || safeBool(() -> ctx.inventory().isItemSelected());
 
             if (!active
                     && noProgressFor >= idleStuckMs
