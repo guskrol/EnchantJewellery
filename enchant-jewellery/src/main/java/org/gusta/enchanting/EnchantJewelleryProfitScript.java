@@ -6,6 +6,7 @@ import com.epicbot.api.shared.entity.ItemWidget;
 import com.epicbot.api.shared.entity.WidgetChild;
 import com.epicbot.api.shared.event.ChatMessageEvent;
 import com.epicbot.api.shared.methods.IBankAPI;
+import com.epicbot.api.shared.methods.IEquipmentAPI;
 import com.epicbot.api.shared.methods.ITabsAPI;
 import com.epicbot.api.shared.model.ItemDetail;
 import com.epicbot.api.shared.model.Skill;
@@ -31,7 +32,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.3-slower-widget-flow";
+    private static final String SCRIPT_VERSION = "v0.1.4-ge-row-gate";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -50,6 +51,7 @@ public class EnchantJewelleryProfitScript extends Script {
     private static final int HUMAN_WIDGET_MAX_MS = 1_650;
     private static final int HUMAN_ITEM_MIN_MS = 700;
     private static final int HUMAN_ITEM_MAX_MS = 1_350;
+    private static final long ROW_TELEPORT_RETRY_MS = 12_000L;
     private static final int SPELLBOOK_GROUP = 218;
     private static final int JEWELLERY_ENCHANTMENTS_CHILD = 15;
     private static final int LEVEL_1_ENCHANT_CHILD = 16;
@@ -126,6 +128,7 @@ public class EnchantJewelleryProfitScript extends Script {
     private long nextMethodRefreshAt;
     private long nextGeCollectAt;
     private long nextIdleLogAt;
+    private long nextRowTeleportAttemptAt;
     private boolean stoppedForNoProfit;
 
     @Override
@@ -219,6 +222,10 @@ public class EnchantJewelleryProfitScript extends Script {
             }
 
             stats.startExperienceIfNeeded(ctx);
+
+            if (!ensureAtGrandExchangeBeforeActions(ctx)) {
+                return;
+            }
 
             if (!pendingGeActions.isEmpty() || !placedGeActions.isEmpty()) {
                 handleGrandExchange(ctx);
@@ -890,6 +897,115 @@ public class EnchantJewelleryProfitScript extends Script {
         }
 
         placeGeAction(ctx, action);
+    }
+
+    private boolean ensureAtGrandExchangeBeforeActions(APIContext ctx) {
+        if (isAtGrandExchange(ctx)) {
+            nextRowTeleportAttemptAt = 0L;
+            return true;
+        }
+
+        resetEnchantCycle();
+
+        if (ctx.bank().isOpen()) {
+            stats.setStatus("Closing bank before ROW teleport to GE");
+            ctx.bank().close();
+            Time.sleep(650, 1000, () -> !ctx.bank().isOpen(), 100);
+            return false;
+        }
+
+        if (ctx.grandExchange().isOpen()) {
+            stats.setStatus("Closing GE before ROW teleport retry");
+            ctx.grandExchange().close();
+            Time.sleep(650, 1000, () -> !ctx.grandExchange().isOpen(), 100);
+            return false;
+        }
+
+        if (ctx.localPlayer().isMoving() || ctx.localPlayer().isAnimating()) {
+            stats.setStatus("Waiting for GE travel");
+            Time.sleep(800, 1300, () -> isAtGrandExchange(ctx), 100);
+            return false;
+        }
+
+        long now = System.currentTimeMillis();
+        if (now < nextRowTeleportAttemptAt) {
+            stats.setStatus("Waiting before retrying equipped ROW teleport to GE");
+            Time.sleep(700, 1100);
+            return false;
+        }
+
+        ItemWidget equippedRing = ctx.equipment().getItem(IEquipmentAPI.Slot.RING);
+        if (!isChargedRingOfWealth(equippedRing)) {
+            stats.setStatus("Equip charged Ring of wealth before starting");
+            logOccasionally("Script is outside GE and requires an equipped charged Ring of wealth.");
+            Time.sleep(1200, 1800);
+            return false;
+        }
+
+        nextRowTeleportAttemptAt = now + ROW_TELEPORT_RETRY_MS;
+        stats.setStatus("Teleporting to GE with equipped Ring of wealth");
+        if (useEquippedRingOfWealthToGe(ctx, equippedRing)) {
+            Time.sleep(2500, 5500, () -> isAtGrandExchange(ctx) || ctx.localPlayer().isMoving(), 100);
+            return false;
+        }
+
+        stats.setStatus("Equipped ROW teleport to GE failed; retrying soon");
+        Time.sleep(900, 1400);
+        return false;
+    }
+
+    private boolean useEquippedRingOfWealthToGe(APIContext ctx, ItemWidget ring) {
+        if (ring == null) {
+            return false;
+        }
+
+        if (interactRingTeleport(ring, "Grand Exchange")
+                || interactRingTeleport(ring, "Grand Exchange teleport")
+                || interactRingTeleport(ring, "GE")) {
+            return true;
+        }
+
+        if (!interactRingTeleport(ring, "Rub")) {
+            return false;
+        }
+
+        Time.sleep(900, 1500,
+                () -> isAtGrandExchange(ctx) || findVisibleWidgetByText(ctx, "Grand Exchange") != null,
+                100);
+        if (isAtGrandExchange(ctx)) {
+            return true;
+        }
+
+        WidgetChild grandExchange = findVisibleWidgetByText(ctx, "Grand Exchange");
+        if (grandExchange == null) {
+            return false;
+        }
+
+        stats.setStatus("Selecting Grand Exchange on ROW menu");
+        return clickWidgetCenter(ctx, grandExchange)
+                || grandExchange.interact("Grand Exchange")
+                || grandExchange.interact("Continue")
+                || grandExchange.interact("Select")
+                || grandExchange.click();
+    }
+
+    private boolean interactRingTeleport(ItemWidget ring, String action) {
+        try {
+            String name = ring.getName();
+            return ring.interact(action, name) || ring.interact(action);
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private boolean isChargedRingOfWealth(ItemWidget item) {
+        if (item == null || item.getName() == null) {
+            return false;
+        }
+        String normalized = normalizedName(item.getName());
+        return normalized.startsWith("ringofwealth")
+                && !normalized.equals("ringofwealth0")
+                && !normalized.contains("uncharged");
     }
 
     private void placeGeAction(APIContext ctx, GeAction action) {
