@@ -32,7 +32,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.10-no-watchdog";
+    private static final String SCRIPT_VERSION = "v0.1.11-direct-material-click";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -129,6 +129,7 @@ public class EnchantJewelleryProfitScript extends Script {
     private long nextGeCollectAt;
     private long nextIdleLogAt;
     private long nextRowTeleportAttemptAt;
+    private long lastSpellWidgetClickAt;
     private boolean stoppedForNoProfit;
 
     @Override
@@ -790,6 +791,9 @@ public class EnchantJewelleryProfitScript extends Script {
         if (!ctx.magic().isSpellSelected()) {
             stats.setStatus("Spell selection not detected; clicking material anyway");
         }
+        if (clicked || ctx.magic().isSpellSelected()) {
+            lastSpellWidgetClickAt = System.currentTimeMillis();
+        }
         return clicked;
     }
 
@@ -802,10 +806,20 @@ public class EnchantJewelleryProfitScript extends Script {
 
         stats.setStatus("Clicking material after spell: " + method.inputItem);
         humanItemPause();
-        boolean clicked = ctx.menu().interact("Cast", method.inputItem, item, false)
-                || ctx.menu().interact("Cast", item, false)
-                || item.interact("Cast")
-                || item.click(false);
+        boolean directClickExpected = ctx.magic().isSpellSelected()
+                || System.currentTimeMillis() - lastSpellWidgetClickAt < 8_000L;
+        boolean clicked = false;
+
+        if (directClickExpected) {
+            clicked = clickInventoryItemByMouse(ctx, item) || item.click(false);
+        }
+
+        if (!clicked) {
+            clicked = ctx.menu().interact("Cast", method.inputItem, item, false)
+                    || ctx.menu().interact("Cast", item, false)
+                    || item.interact("Cast");
+        }
+
         Time.sleep(HUMAN_ITEM_MIN_MS, HUMAN_ITEM_MAX_MS);
         return clicked;
     }
@@ -1235,6 +1249,40 @@ public class EnchantJewelleryProfitScript extends Script {
         }
         Point point = widget.getCentralPoint();
         return point != null && ctx.mouse().click(point, false);
+    }
+
+    private boolean clickInventoryItemByMouse(APIContext ctx, ItemWidget item) {
+        if (item == null) {
+            return false;
+        }
+        Rectangle bounds = item.getBounds();
+        if (bounds == null || bounds.width <= 0 || bounds.height <= 0) {
+            return false;
+        }
+        Point point = randomPointInside(bounds, 5);
+        return ctx.mouse().click(point, false);
+    }
+
+    private Point randomPointInside(Rectangle bounds, int margin) {
+        int marginX = Math.min(Math.max(0, margin), Math.max(0, bounds.width / 3));
+        int marginY = Math.min(Math.max(0, margin), Math.max(0, bounds.height / 3));
+        int left = bounds.x + marginX;
+        int right = bounds.x + bounds.width - marginX - 1;
+        int top = bounds.y + marginY;
+        int bottom = bounds.y + bounds.height - marginY - 1;
+
+        if (right < left) {
+            left = bounds.x + bounds.width / 2;
+            right = left;
+        }
+        if (bottom < top) {
+            top = bounds.y + bounds.height / 2;
+            bottom = top;
+        }
+
+        int x = left == right ? left : ThreadLocalRandom.current().nextInt(left, right + 1);
+        int y = top == bottom ? top : ThreadLocalRandom.current().nextInt(top, bottom + 1);
+        return new Point(x, y);
     }
 
     private boolean isVisibleWidget(WidgetChild widget) {
