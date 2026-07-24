@@ -32,7 +32,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.12-sapphire-only";
+    private static final String SCRIPT_VERSION = "v0.1.13-force-second-batch-spell";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -99,6 +99,7 @@ public class EnchantJewelleryProfitScript extends Script {
     private long nextIdleLogAt;
     private long nextRowTeleportAttemptAt;
     private long lastSpellWidgetClickAt;
+    private boolean forceSpellSelectionForNextInventory;
     private boolean stoppedForNoProfit;
 
     @Override
@@ -654,6 +655,7 @@ public class EnchantJewelleryProfitScript extends Script {
         enchantCycleLastInputCount = currentInput;
         enchantCycleLastOutputCount = currentOutput;
         enchantCycleLastProgressAt = System.currentTimeMillis();
+        forceSpellSelectionForNextInventory = false;
     }
 
     private void recordEnchantCycleProgress(int currentInput, int currentOutput) {
@@ -679,10 +681,12 @@ public class EnchantJewelleryProfitScript extends Script {
     }
 
     private boolean selectSpellAndClickItem(APIContext ctx, EnchantMethod method) {
-        if (!ctx.magic().isSpellSelected()) {
+        boolean shouldSelectSpell = forceSpellSelectionForNextInventory || !ctx.magic().isSpellSelected();
+        if (shouldSelectSpell) {
             if (!selectJewelleryEnchantSpell(ctx, method)) {
                 return false;
             }
+            forceSpellSelectionForNextInventory = false;
             humanWidgetPause();
         }
 
@@ -707,6 +711,11 @@ public class EnchantJewelleryProfitScript extends Script {
     }
 
     private boolean openJewelleryEnchantments(APIContext ctx, EnchantMethod method) {
+        WidgetChild expectedEnchant = ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild);
+        if (isVisibleWidget(expectedEnchant)) {
+            return true;
+        }
+
         for (int attempt = 1; attempt <= 2; attempt++) {
             WidgetChild jewelleryEnchantments = ctx.widgets().get(SPELLBOOK_GROUP, JEWELLERY_ENCHANTMENTS_CHILD);
             if (!isVisibleWidget(jewelleryEnchantments)) {
@@ -1132,6 +1141,10 @@ public class EnchantJewelleryProfitScript extends Script {
 
     private void closeBank(APIContext ctx, String status) {
         stats.setStatus(status);
+        if (status != null && status.startsWith("Ready to enchant")) {
+            forceSpellSelectionForNextInventory = true;
+            lastSpellWidgetClickAt = 0L;
+        }
         ctx.bank().close();
         Time.sleep(500, 900, () -> !ctx.bank().isOpen(), 100);
     }
