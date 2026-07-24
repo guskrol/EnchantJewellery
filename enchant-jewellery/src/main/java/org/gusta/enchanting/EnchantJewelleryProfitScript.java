@@ -2,6 +2,8 @@ package org.gusta.enchanting;
 
 import com.epicbot.api.shared.APIContext;
 import com.epicbot.api.shared.GameType;
+import com.epicbot.api.gameval.VarPlayerID;
+import com.epicbot.api.gameval.VarbitID;
 import com.epicbot.api.shared.entity.ItemWidget;
 import com.epicbot.api.shared.entity.WidgetChild;
 import com.epicbot.api.shared.event.ChatMessageEvent;
@@ -23,16 +25,26 @@ import com.epicbot.api.shared.util.time.Time;
 import java.awt.Color;
 import java.awt.Point;
 import java.awt.Rectangle;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.BooleanSupplier;
+import java.util.function.IntSupplier;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.4-ge-row-gate";
+    private static final String SCRIPT_VERSION = "v0.1.6-watchdog-diagnostics";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -52,6 +64,13 @@ public class EnchantJewelleryProfitScript extends Script {
     private static final int HUMAN_ITEM_MIN_MS = 700;
     private static final int HUMAN_ITEM_MAX_MS = 1_350;
     private static final long ROW_TELEPORT_RETRY_MS = 12_000L;
+    private static final long WATCHDOG_WARMUP_MS = 90_000L;
+    private static final long WATCHDOG_IDLE_MIN_MS = 2 * 60_000L;
+    private static final long WATCHDOG_IDLE_MAX_MS = 3 * 60_000L;
+    private static final long WATCHDOG_HARD_MIN_MS = 6 * 60_000L;
+    private static final long WATCHDOG_HARD_MAX_MS = 8 * 60_000L;
+    private static final long WATCHDOG_INFO_LOG_MS = 60_000L;
+    private static final int WATCHDOG_TILE_PROGRESS_DISTANCE = 4;
     private static final int SPELLBOOK_GROUP = 218;
     private static final int JEWELLERY_ENCHANTMENTS_CHILD = 15;
     private static final int LEVEL_1_ENCHANT_CHILD = 16;
@@ -72,6 +91,7 @@ public class EnchantJewelleryProfitScript extends Script {
                     7,
                     Spell.Modern.LEVEL_1_ENCHANT,
                     LEVEL_1_ENCHANT_CHILD,
+                    "Lvl-1 Enchant",
                     "Staff of water",
                     "Sapphire ring",
                     "Ring of recoil",
@@ -86,6 +106,7 @@ public class EnchantJewelleryProfitScript extends Script {
                     27,
                     Spell.Modern.LEVEL_2_ENCHANT,
                     LEVEL_2_ENCHANT_CHILD,
+                    "Lvl-2 Enchant",
                     "Staff of air",
                     "Jade amulet",
                     "Amulet of chemistry",
@@ -100,6 +121,7 @@ public class EnchantJewelleryProfitScript extends Script {
                     49,
                     Spell.Modern.LEVEL_3_ENCHANT,
                     LEVEL_3_ENCHANT_CHILD,
+                    "Lvl-3 Enchant",
                     "Staff of fire",
                     "Topaz bracelet",
                     "Bracelet of slaughter",
@@ -113,6 +135,7 @@ public class EnchantJewelleryProfitScript extends Script {
     private final Queue<GeAction> pendingGeActions = new ArrayDeque<>();
     private final List<GeAction> placedGeActions = new ArrayList<>();
     private final Pricing pricing = new Pricing();
+    private final Watchdog watchdog = new Watchdog();
 
     private Stats stats;
     private EnchantMethod activeMethod;
@@ -134,6 +157,7 @@ public class EnchantJewelleryProfitScript extends Script {
     @Override
     public boolean onStart(String... args) {
         stats = new Stats();
+        watchdog.reset();
         addTask(new EnchantTask());
         log("Enchant Jewellery Profit " + SCRIPT_VERSION + " started");
         return true;
@@ -197,6 +221,7 @@ public class EnchantJewelleryProfitScript extends Script {
     @Override
     protected void onStop() {
         resetEnchantCycle();
+        watchdog.reset();
         clearClientInteractionState();
         getLogger().info("Enchant Jewellery Profit " + SCRIPT_VERSION + " stopped");
     }
@@ -204,6 +229,7 @@ public class EnchantJewelleryProfitScript extends Script {
     @Override
     protected void onPause() {
         resetEnchantCycle();
+        watchdog.reset();
         clearClientInteractionState();
     }
 
@@ -222,6 +248,10 @@ public class EnchantJewelleryProfitScript extends Script {
             }
 
             stats.startExperienceIfNeeded(ctx);
+
+            if (watchdog.checkAndHandle(ctx)) {
+                return;
+            }
 
             if (!ensureAtGrandExchangeBeforeActions(ctx)) {
                 return;
@@ -610,6 +640,7 @@ public class EnchantJewelleryProfitScript extends Script {
         int beforeInput = ctx.inventory().getCount(method.inputItem);
         int beforeOutput = ctx.inventory().getCount(method.outputItem);
         stats.setStatus("Starting inventory enchant: " + method.inputItem + " -> " + method.outputItem);
+        traceEnchant("start-inventory-enchant", ctx, method);
         boolean cast = selectSpellAndClickItem(ctx, method);
 
         Time.sleep(
@@ -639,6 +670,7 @@ public class EnchantJewelleryProfitScript extends Script {
         }
 
         if (!cast) {
+            traceEnchant("cast-did-not-start", ctx, method);
             stats.setStatus("Enchant cast did not start for " + method.label);
         }
         Time.sleep(600, 900);
@@ -709,31 +741,41 @@ public class EnchantJewelleryProfitScript extends Script {
     }
 
     private boolean selectSpellAndClickItem(APIContext ctx, EnchantMethod method) {
+        traceEnchant("select-spell-and-item:start", ctx, method);
         if (!ctx.magic().isSpellSelected()) {
             if (!selectJewelleryEnchantSpell(ctx, method)) {
+                traceEnchant("select-spell-and-item:spell-failed", ctx, method);
                 return false;
             }
             humanWidgetPause();
         }
 
         if (!openInventoryTab(ctx)) {
+            traceEnchant("select-spell-and-item:inventory-tab-failed", ctx, method);
             return false;
         }
         humanItemPause();
 
-        return clickEnchantMaterial(ctx, method);
+        boolean clickedMaterial = clickEnchantMaterial(ctx, method);
+        traceEnchant("select-spell-and-item:material-click-result=" + clickedMaterial, ctx, method);
+        return clickedMaterial;
     }
 
     private boolean selectJewelleryEnchantSpell(APIContext ctx, EnchantMethod method) {
+        traceEnchant("select-spell:start", ctx, method);
         if (!openMagicTab(ctx)) {
+            traceEnchant("select-spell:magic-tab-failed", ctx, method);
             return false;
         }
 
         if (!openJewelleryEnchantments(ctx, method)) {
+            traceEnchant("select-spell:jewellery-menu-failed", ctx, method);
             return false;
         }
 
-        return clickEnchantSpellWidget(ctx, method);
+        boolean clickedSpell = clickEnchantSpellWidget(ctx, method);
+        traceEnchant("select-spell:spell-widget-click-result=" + clickedSpell, ctx, method);
+        return clickedSpell;
     }
 
     private boolean openJewelleryEnchantments(APIContext ctx, EnchantMethod method) {
@@ -741,18 +783,26 @@ public class EnchantJewelleryProfitScript extends Script {
             WidgetChild jewelleryEnchantments = ctx.widgets().get(SPELLBOOK_GROUP, JEWELLERY_ENCHANTMENTS_CHILD);
             if (!isVisibleWidget(jewelleryEnchantments)) {
                 stats.setStatus("Jewellery Enchantments widget missing: 218." + JEWELLERY_ENCHANTMENTS_CHILD);
+                dumpSpellbookWidgets(ctx, "jewellery-menu-missing");
                 return false;
             }
 
             stats.setStatus("Opening Jewellery Enchantments via 218." + JEWELLERY_ENCHANTMENTS_CHILD);
+            logDiagnostic("Opening jewellery widget attempt=" + attempt
+                    + " widget=" + widgetSummary(jewelleryEnchantments)
+                    + " vars=" + varsSnapshot(ctx));
             humanWidgetPause();
-            clickWidgetActions(ctx, jewelleryEnchantments, "Open", "View", "Cast");
+            boolean opened = clickWidgetActions(ctx, jewelleryEnchantments, "Open", "View", "Cast");
             Time.sleep(
                     HUMAN_WIDGET_MIN_MS,
                     HUMAN_WIDGET_MAX_MS,
                     () -> isVisibleWidget(ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild)),
                     100
             );
+            logDiagnostic("Jewellery widget clicked=" + opened
+                    + " expectedChild=" + method.spellWidgetChild
+                    + " visible=" + isVisibleWidget(ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild))
+                    + " vars=" + varsSnapshot(ctx));
 
             if (isVisibleWidget(ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild))) {
                 return true;
@@ -760,6 +810,7 @@ public class EnchantJewelleryProfitScript extends Script {
         }
 
         stats.setStatus("Enchant widget missing after opening: 218." + method.spellWidgetChild);
+        dumpSpellbookWidgets(ctx, "expected-enchant-child-missing");
         return false;
     }
 
@@ -767,10 +818,24 @@ public class EnchantJewelleryProfitScript extends Script {
         WidgetChild spellWidget = ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild);
         if (!isVisibleWidget(spellWidget)) {
             stats.setStatus("Enchant widget missing: 218." + method.spellWidgetChild);
+            dumpSpellbookWidgets(ctx, "spell-widget-not-visible");
+            return false;
+        }
+
+        if (!isExpectedEnchantWidget(method, spellWidget)) {
+            stats.setStatus("Wrong enchant widget at 218." + method.spellWidgetChild
+                    + "; expected " + method.expectedSpellText);
+            logDiagnostic("Wrong enchant widget. expected=" + method.expectedSpellText
+                    + " actual=" + widgetSummary(spellWidget)
+                    + " vars=" + varsSnapshot(ctx));
+            dumpSpellbookWidgets(ctx, "wrong-enchant-widget");
             return false;
         }
 
         stats.setStatus("Selecting " + method.spell.getSpellName() + " via 218." + method.spellWidgetChild);
+        logDiagnostic("Clicking enchant widget expected=" + method.expectedSpellText
+                + " widget=" + widgetSummary(spellWidget)
+                + " varsBefore=" + varsSnapshot(ctx));
         humanWidgetPause();
         boolean clicked = clickWidgetActions(ctx, spellWidget, "Cast", method.spell.getSpellName());
         Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.magic().isSpellSelected(), 100);
@@ -790,6 +855,9 @@ public class EnchantJewelleryProfitScript extends Script {
         if (!ctx.magic().isSpellSelected()) {
             stats.setStatus("Spell selection not detected; clicking material anyway");
         }
+        logDiagnostic("Enchant widget click result=" + clicked
+                + " spellSelected=" + ctx.magic().isSpellSelected()
+                + " varsAfter=" + varsSnapshot(ctx));
         return clicked;
     }
 
@@ -797,16 +865,29 @@ public class EnchantJewelleryProfitScript extends Script {
         ItemWidget item = ctx.inventory().getItem(method.inputItem);
         if (item == null) {
             stats.setStatus("Missing material in inventory: " + method.inputItem);
+            logDiagnostic("Material missing before click: " + method.inputItem
+                    + " inventory=" + itemSummary(ctx.inventory().getItems())
+                    + " vars=" + varsSnapshot(ctx));
             return false;
         }
 
         stats.setStatus("Clicking material after spell: " + method.inputItem);
+        logDiagnostic("Clicking material item=" + itemSummary(item)
+                + " method=" + method.key
+                + " spellSelected=" + ctx.magic().isSpellSelected()
+                + " itemSelected=" + ctx.inventory().isItemSelected()
+                + " varsBefore=" + varsSnapshot(ctx));
         humanItemPause();
         boolean clicked = ctx.menu().interact("Cast", method.inputItem, item, false)
                 || ctx.menu().interact("Cast", item, false)
                 || item.interact("Cast")
                 || item.click(false);
         Time.sleep(HUMAN_ITEM_MIN_MS, HUMAN_ITEM_MAX_MS);
+        logDiagnostic("Material click result=" + clicked
+                + " inputCount=" + ctx.inventory().getCount(method.inputItem)
+                + " outputCount=" + ctx.inventory().getCount(method.outputItem)
+                + " animating=" + ctx.localPlayer().isAnimating()
+                + " varsAfter=" + varsSnapshot(ctx));
         return clicked;
     }
 
@@ -1186,6 +1267,178 @@ public class EnchantJewelleryProfitScript extends Script {
                 .replaceAll("[^a-z0-9]", "");
     }
 
+    private void traceEnchant(String phase, APIContext ctx, EnchantMethod method) {
+        logDiagnostic("phase=" + phase
+                + " method=" + (method == null ? "-" : method.key)
+                + " status='" + (stats == null ? "-" : stats.status) + "'"
+                + " counts=" + enchantCounts(ctx, method)
+                + " selectedSpell=" + safeBool(() -> ctx.magic().isSpellSelected())
+                + " selectedItem=" + safeBool(() -> ctx.inventory().isItemSelected())
+                + " tabsMagic=" + safeBool(() -> ctx.tabs().isOpen(ITabsAPI.Tabs.MAGIC))
+                + " tabsInv=" + safeBool(() -> ctx.tabs().isOpen(ITabsAPI.Tabs.INVENTORY))
+                + " vars=" + varsSnapshot(ctx));
+    }
+
+    private void logDiagnostic(String message) {
+        String full = "[Diag] " + message;
+        if (stats != null) {
+            stats.recordEvent(full);
+        }
+        getLogger().info(full);
+    }
+
+    private String enchantCounts(APIContext ctx, EnchantMethod method) {
+        if (ctx == null || method == null) {
+            return "-";
+        }
+        return method.inputItem + "=" + safeInt(() -> ctx.inventory().getCount(method.inputItem))
+                + "," + method.outputItem + "=" + safeInt(() -> ctx.inventory().getCount(method.outputItem))
+                + "," + COSMIC_RUNE + "=" + safeInt(() -> ctx.inventory().getCount(true, COSMIC_RUNE));
+    }
+
+    private boolean isExpectedEnchantWidget(EnchantMethod method, WidgetChild widget) {
+        String signal = normalizedName(visibleText(widget));
+        if (signal.isBlank()) {
+            return true;
+        }
+        String expected = normalizedName(method.expectedSpellText);
+        return !signal.contains("lvl")
+                || !signal.contains("enchant")
+                || signal.contains(expected);
+    }
+
+    private void dumpSpellbookWidgets(APIContext ctx, String reason) {
+        StringBuilder summary = new StringBuilder();
+        int[] children = {
+                JEWELLERY_ENCHANTMENTS_CHILD,
+                LEVEL_1_ENCHANT_CHILD,
+                LEVEL_2_ENCHANT_CHILD,
+                LEVEL_3_ENCHANT_CHILD,
+                LEVEL_4_ENCHANT_CHILD
+        };
+        for (int child : children) {
+            if (summary.length() > 0) {
+                summary.append(" | ");
+            }
+            summary.append("218.").append(child).append('=')
+                    .append(widgetSummary(ctx.widgets().get(SPELLBOOK_GROUP, child)));
+        }
+
+        int extra = 0;
+        for (WidgetChild widget : ctx.widgets().getAllChildren(candidate -> {
+            if (!isVisibleWidget(candidate)) {
+                return false;
+            }
+            String text = normalizedName(visibleText(candidate));
+            return text.contains("enchant") || text.contains("jewellery");
+        })) {
+            if (extra++ >= 12) {
+                break;
+            }
+            summary.append(" | match").append(extra).append('=').append(widgetSummary(widget));
+        }
+
+        logDiagnostic("Spellbook widget dump reason=" + reason
+                + " vars=" + varsSnapshot(ctx)
+                + " widgets=" + shortText(summary.toString(), 2400));
+    }
+
+    private String varsSnapshot(APIContext ctx) {
+        if (ctx == null) {
+            return "ctx=null";
+        }
+        return "spellbook=" + safeInt(() -> ctx.vars().getVarbit(VarbitID.SPELLBOOK))
+                + ",sublist=" + safeInt(() -> ctx.vars().getVarbit(VarbitID.SPELLBOOK_SUBLIST))
+                + ",filterCombat=" + safeInt(() -> ctx.vars().getVarbit(VarbitID.MAGIC_FILTER_BLOCKCOMBAT))
+                + ",filterUtility=" + safeInt(() -> ctx.vars().getVarbit(VarbitID.MAGIC_FILTER_BLOCKUTILITY))
+                + ",filterLevel=" + safeInt(() -> ctx.vars().getVarbit(VarbitID.MAGIC_FILTER_BLOCKLACKLEVEL))
+                + ",filterRunes=" + safeInt(() -> ctx.vars().getVarbit(VarbitID.MAGIC_FILTER_BLOCKLACKRUNES))
+                + ",autocastSet=" + safeInt(() -> ctx.vars().getVarbit(VarbitID.AUTOCAST_SET))
+                + ",autocastSpell=" + safeInt(() -> ctx.vars().getVarbit(VarbitID.AUTOCAST_SPELL))
+                + ",lastCastSpell=" + safeInt(() -> ctx.vars().getVarp(VarPlayerID.LASTCASTSPELL));
+    }
+
+    private String widgetSummary(WidgetChild widget) {
+        if (widget == null) {
+            return "null";
+        }
+        String text = shortText(cleanWidgetText(visibleText(widget)), 80);
+        return "{valid=" + safeBool(widget::isValid)
+                + ",parent=" + safeInt(widget::getParentId)
+                + ",child=" + safeInt(widget::getChildId)
+                + ",idx=" + safeInt(widget::getIndex)
+                + ",text='" + text + "'"
+                + ",actions=" + shortText(String.valueOf(widget.getActions()), 90)
+                + ",itemId=" + safeInt(widget::getItemId)
+                + ",modelId=" + safeInt(widget::getModelId)
+                + ",bounds=" + widget.getBounds()
+                + "}";
+    }
+
+    private String itemSummary(ItemWidget item) {
+        if (item == null) {
+            return "null";
+        }
+        return "{name='" + item.getName() + "'"
+                + ",id=" + safeInt(item::getId)
+                + ",idx=" + safeInt(item::getIndex)
+                + ",stack=" + safeInt(item::getStackSize)
+                + ",noted=" + safeBool(item::isNoted)
+                + ",actions=" + shortText(String.valueOf(item.getActions()), 90)
+                + ",bounds=" + item.getBounds()
+                + "}";
+    }
+
+    private String itemSummary(Iterable<ItemWidget> items) {
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        for (ItemWidget item : items) {
+            if (item == null || item.getName() == null || item.getName().isBlank()) {
+                continue;
+            }
+            String key = item.getName() + (item.isNoted() ? " (noted)" : "");
+            int amount = Math.max(1, item.getStackSize());
+            counts.merge(key, amount, Integer::sum);
+        }
+        if (counts.isEmpty()) {
+            return "empty";
+        }
+        StringBuilder summary = new StringBuilder();
+        for (Map.Entry<String, Integer> entry : counts.entrySet()) {
+            if (summary.length() > 0) {
+                summary.append(", ");
+            }
+            summary.append(entry.getKey()).append(" x").append(entry.getValue());
+        }
+        return summary.toString();
+    }
+
+    private String locationText(APIContext ctx) {
+        if (ctx == null) {
+            return "unknown";
+        }
+        Tile tile = ctx.localPlayer().getLocation();
+        if (tile == null) {
+            return "unknown";
+        }
+        return tile.getX() + "," + tile.getY() + "," + tile.getPlane();
+    }
+
+    private int safeInt(IntSupplier supplier) {
+        try {
+            return supplier.getAsInt();
+        } catch (RuntimeException ignored) {
+            return Integer.MIN_VALUE;
+        }
+    }
+
+    private boolean safeBool(BooleanSupplier supplier) {
+        try {
+            return supplier.getAsBoolean();
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
     private String visibleText(WidgetChild widget) {
         if (widget == null) {
             return "";
@@ -1294,6 +1547,7 @@ public class EnchantJewelleryProfitScript extends Script {
     private void log(String message) {
         if (stats != null) {
             stats.setStatus(message);
+            stats.recordEvent("LOG " + message);
         }
         getLogger().info(message);
     }
@@ -1321,12 +1575,415 @@ public class EnchantJewelleryProfitScript extends Script {
         return (int) Math.max(0L, Math.min(Integer.MAX_VALUE, value));
     }
 
+    private class Watchdog {
+        private long startedAt;
+        private WatchdogSnapshot lastProgressSnapshot;
+        private String lastState = "";
+        private Tile lastStableTile;
+        private long lastProgressAt;
+        private long sameStateSince;
+        private long sameTileSince;
+        private long nextInfoLogAt;
+        private long idleStuckMs;
+        private long hardStuckMs;
+        private boolean triggered;
+
+        private Watchdog() {
+            reset();
+        }
+
+        private void reset() {
+            startedAt = System.currentTimeMillis();
+            lastProgressSnapshot = null;
+            lastState = "";
+            lastStableTile = null;
+            long now = System.currentTimeMillis();
+            lastProgressAt = now;
+            sameStateSince = now;
+            sameTileSince = now;
+            nextInfoLogAt = now + WATCHDOG_INFO_LOG_MS;
+            triggered = false;
+            resetThresholds();
+        }
+
+        private boolean checkAndHandle(APIContext ctx) {
+            if (ctx == null || triggered || safeBool(() -> ctx.script().isStopping())) {
+                return triggered;
+            }
+
+            if (!safeBool(() -> ctx.client().isLoggedIn())) {
+                trigger(ctx, "Watchdog stop: client is already logged out while script is active", false);
+                return true;
+            }
+
+            long now = System.currentTimeMillis();
+            WatchdogSnapshot current = captureWatchdogSnapshot(ctx);
+            if (lastProgressSnapshot == null || current.hasMaterialProgressSince(lastProgressSnapshot)) {
+                initialize(now, current);
+                return false;
+            }
+
+            updateStableState(ctx, now, current);
+            if (now - startedAt < WATCHDOG_WARMUP_MS) {
+                return false;
+            }
+
+            long noProgressFor = now - lastProgressAt;
+            long sameTileFor = now - sameTileSince;
+            long sameStateFor = now - sameStateSince;
+            boolean active = safeBool(() -> ctx.localPlayer().isMoving())
+                    || safeBool(() -> ctx.localPlayer().isAnimating())
+                    || safeBool(() -> ctx.localPlayer().isInCombat())
+                    || safeBool(() -> ctx.localPlayer().isAttacking());
+            boolean interfaceStuck = safeBool(() -> ctx.bank().isOpen())
+                    || safeBool(() -> ctx.grandExchange().isOpen())
+                    || safeBool(() -> ctx.menu().isOpen())
+                    || safeBool(() -> ctx.dialogues().isDialogueOpen())
+                    || safeBool(() -> ctx.inventory().isItemSelected())
+                    || safeBool(() -> ctx.widgets().isInterfaceOpen());
+
+            if (!active
+                    && noProgressFor >= idleStuckMs
+                    && sameTileFor >= idleStuckMs
+                    && sameStateFor >= idleStuckMs / 2) {
+                trigger(ctx, "Watchdog logout: idle without material progress for "
+                        + minutes(noProgressFor)
+                        + " min; state=" + current.stateSignature, true);
+                return true;
+            }
+
+            if (noProgressFor >= hardStuckMs
+                    && sameTileFor >= hardStuckMs / 2
+                    && (!active || interfaceStuck || sameStateFor >= idleStuckMs)) {
+                trigger(ctx, "Watchdog logout: no material progress for "
+                        + minutes(noProgressFor)
+                        + " min; active=" + active
+                        + " interfaceStuck=" + interfaceStuck
+                        + " state=" + current.stateSignature, true);
+                return true;
+            }
+
+            if (noProgressFor >= 90_000L && now >= nextInfoLogAt) {
+                logDiagnostic("Watchdog observing no progress for " + minutes(noProgressFor)
+                        + " min; sameTile=" + minutes(sameTileFor)
+                        + " min; sameState=" + minutes(sameStateFor)
+                        + " min; state=" + current.stateSignature);
+                nextInfoLogAt = now + WATCHDOG_INFO_LOG_MS;
+            }
+
+            return false;
+        }
+
+        private void initialize(long now, WatchdogSnapshot snapshot) {
+            lastProgressSnapshot = snapshot;
+            lastState = snapshot.stateSignature;
+            lastStableTile = snapshot.tile;
+            lastProgressAt = now;
+            sameStateSince = now;
+            sameTileSince = now;
+            nextInfoLogAt = now + WATCHDOG_INFO_LOG_MS;
+            resetThresholds();
+        }
+
+        private void updateStableState(APIContext ctx, long now, WatchdogSnapshot snapshot) {
+            if (!snapshot.stateSignature.equals(lastState)) {
+                lastState = snapshot.stateSignature;
+                sameStateSince = now;
+            }
+
+            Tile currentTile = safeTile(ctx);
+            if (lastStableTile == null
+                    || currentTile == null
+                    || tileDistance(lastStableTile, currentTile) >= WATCHDOG_TILE_PROGRESS_DISTANCE) {
+                lastStableTile = currentTile;
+                sameTileSince = now;
+            }
+        }
+
+        private void trigger(APIContext ctx, String reason, boolean requestLogout) {
+            triggered = true;
+            stats.setStatus(reason);
+            logDiagnostic(reason);
+            Path report = saveWatchdogReport(ctx, reason, requestLogout ? "before-logout" : "stop-only");
+            clearBlockingInterfacesForWatchdog(ctx);
+
+            boolean logoutRequested = false;
+            if (requestLogout && safeBool(() -> ctx.client().isLoggedIn())) {
+                try {
+                    logoutRequested = ctx.game().logout();
+                    Time.sleep(1200, 2200, () -> !ctx.client().isLoggedIn(), 100);
+                } catch (RuntimeException e) {
+                    logDiagnostic("Watchdog logout failed: " + e.getClass().getSimpleName()
+                            + ": " + e.getMessage());
+                }
+            }
+
+            appendWatchdogReportFooter(report, logoutRequested);
+            ctx.script().stop(reason);
+        }
+
+        private void resetThresholds() {
+            idleStuckMs = randomLong(WATCHDOG_IDLE_MIN_MS, WATCHDOG_IDLE_MAX_MS);
+            hardStuckMs = randomLong(WATCHDOG_HARD_MIN_MS, WATCHDOG_HARD_MAX_MS);
+        }
+    }
+
+    private class WatchdogSnapshot {
+        private final int magicXp;
+        private final int inventoryFingerprint;
+        private final int equipmentFingerprint;
+        private final long progressScore;
+        private final String stateSignature;
+        private final Tile tile;
+
+        private WatchdogSnapshot(
+                int magicXp,
+                int inventoryFingerprint,
+                int equipmentFingerprint,
+                long progressScore,
+                String stateSignature,
+                Tile tile
+        ) {
+            this.magicXp = magicXp;
+            this.inventoryFingerprint = inventoryFingerprint;
+            this.equipmentFingerprint = equipmentFingerprint;
+            this.progressScore = progressScore;
+            this.stateSignature = stateSignature;
+            this.tile = tile;
+        }
+
+        private boolean hasMaterialProgressSince(WatchdogSnapshot previous) {
+            return magicXp != previous.magicXp
+                    || inventoryFingerprint != previous.inventoryFingerprint
+                    || equipmentFingerprint != previous.equipmentFingerprint
+                    || progressScore != previous.progressScore;
+        }
+    }
+
+    private WatchdogSnapshot captureWatchdogSnapshot(APIContext ctx) {
+        return new WatchdogSnapshot(
+                safeInt(() -> ctx.skills().get(Skill.Skills.MAGIC).getExperience()),
+                itemFingerprint(ctx.inventory().getItems()),
+                itemFingerprint(ctx.equipment().getItems()),
+                progressScore(ctx),
+                stateSignature(ctx),
+                safeTile(ctx)
+        );
+    }
+
+    private long progressScore(APIContext ctx) {
+        long score = stats == null ? 0L : stats.casts;
+        score = 31L * score + activeBatchCasts;
+        score = 31L * score + pendingGeActions.size();
+        score = 31L * score + placedGeActions.size();
+        score = 31L * score + safeInt(() -> ctx.inventory().getCount(true, COINS));
+        if (activeMethod != null) {
+            score = 31L * score + safeInt(() -> ctx.inventory().getCount(activeMethod.inputItem));
+            score = 31L * score + safeInt(() -> ctx.inventory().getCount(activeMethod.outputItem));
+        }
+        return score;
+    }
+
+    private String stateSignature(APIContext ctx) {
+        EnchantMethod method = activeMethod;
+        return "status=" + (stats == null ? "-" : normalizedStatus(stats.status))
+                + "|method=" + (method == null ? "-" : method.key)
+                + "|bank=" + safeBool(() -> ctx.bank().isOpen())
+                + "|ge=" + safeBool(() -> ctx.grandExchange().isOpen())
+                + "|menu=" + safeBool(() -> ctx.menu().isOpen())
+                + "|dialogue=" + safeBool(() -> ctx.dialogues().isDialogueOpen())
+                + "|itemSelected=" + safeBool(() -> ctx.inventory().isItemSelected())
+                + "|spellSelected=" + safeBool(() -> ctx.magic().isSpellSelected())
+                + "|moving=" + safeBool(() -> ctx.localPlayer().isMoving())
+                + "|animating=" + safeBool(() -> ctx.localPlayer().isAnimating())
+                + "|input=" + (method == null ? 0 : safeInt(() -> ctx.inventory().getCount(method.inputItem)))
+                + "|output=" + (method == null ? 0 : safeInt(() -> ctx.inventory().getCount(method.outputItem)))
+                + "|pending=" + pendingGeActions.size()
+                + "|placed=" + placedGeActions.size()
+                + "|cycle=" + enchantInventoryCycleActive
+                + "|loc=" + locationText(ctx);
+    }
+
+    private String normalizedStatus(String status) {
+        if (status == null || status.isBlank()) {
+            return "-";
+        }
+        return status.replaceAll("\\d+", "#");
+    }
+
+    private int itemFingerprint(Iterable<ItemWidget> items) {
+        int result = 17;
+        for (ItemWidget item : items) {
+            if (item == null || item.getName() == null || item.getName().isBlank()) {
+                continue;
+            }
+            result = 31 * result + item.getIndex();
+            result = 31 * result + item.getId();
+            result = 31 * result + item.getStackSize();
+            result = 31 * result + (item.isNoted() ? 1 : 0);
+        }
+        return result;
+    }
+
+    private Tile safeTile(APIContext ctx) {
+        try {
+            return ctx.localPlayer().getLocation();
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private int tileDistance(Tile left, Tile right) {
+        if (left == null || right == null || left.getPlane() != right.getPlane()) {
+            return Integer.MAX_VALUE;
+        }
+        return Math.max(Math.abs(left.getX() - right.getX()), Math.abs(left.getY() - right.getY()));
+    }
+
+    private long randomLong(long minInclusive, long maxInclusive) {
+        return ThreadLocalRandom.current().nextLong(minInclusive, maxInclusive + 1L);
+    }
+
+    private long minutes(long millis) {
+        return Math.max(1L, Math.round(millis / 60_000.0D));
+    }
+
+    private void clearBlockingInterfacesForWatchdog(APIContext ctx) {
+        try {
+            if (ctx.menu().isOpen()) {
+                ctx.menu().closeMenu();
+            }
+            if (ctx.inventory().isItemSelected()) {
+                ctx.inventory().deselectItem();
+            }
+            if (ctx.grandExchange().isOpen()) {
+                ctx.grandExchange().close();
+            }
+            if (ctx.bank().isOpen()) {
+                ctx.bank().close();
+            }
+            if (ctx.widgets().isInterfaceOpen()) {
+                ctx.widgets().closeInterface();
+            }
+        } catch (RuntimeException e) {
+            logDiagnostic("Watchdog interface cleanup failed: "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
+        }
+    }
+
+    private Path saveWatchdogReport(APIContext ctx, String reason, String phase) {
+        String report = buildWatchdogReport(ctx, reason, phase);
+        try {
+            Path path = watchdogReportPath();
+            Files.createDirectories(path.getParent());
+            Files.writeString(path, report);
+            logDiagnostic("Watchdog report saved: " + path);
+            return path;
+        } catch (RuntimeException | IOException firstFailure) {
+            try {
+                Path fallback = Path.of(
+                        System.getProperty("user.home", "."),
+                        "enchant-jewellery-watchdog-reports",
+                        watchdogReportFileName()
+                );
+                Files.createDirectories(fallback.getParent());
+                Files.writeString(fallback, report);
+                logDiagnostic("Watchdog report saved: " + fallback);
+                return fallback;
+            } catch (RuntimeException | IOException secondFailure) {
+                logDiagnostic("Could not save watchdog report: " + secondFailure.getMessage());
+                return null;
+            }
+        }
+    }
+
+    private void appendWatchdogReportFooter(Path path, boolean logoutRequested) {
+        if (path == null) {
+            return;
+        }
+        try {
+            Files.writeString(
+                    path,
+                    "\nlogoutRequested=" + logoutRequested
+                            + "\nclientLoggedInAfterLogout="
+                            + safeBool(() -> getAPIContext() != null && getAPIContext().client().isLoggedIn())
+                            + "\n",
+                    StandardOpenOption.APPEND
+            );
+        } catch (RuntimeException | IOException e) {
+            logDiagnostic("Could not append watchdog report footer: " + e.getMessage());
+        }
+    }
+
+    private Path watchdogReportPath() {
+        return Path.of(System.getProperty("user.dir", "."), "watchdog-reports", watchdogReportFileName());
+    }
+
+    private String watchdogReportFileName() {
+        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+        return "enchant-jewellery-watchdog-" + timestamp + ".txt";
+    }
+
+    private String buildWatchdogReport(APIContext ctx, String reason, String phase) {
+        StringBuilder report = new StringBuilder();
+        report.append("Enchant Jewellery watchdog report\n");
+        report.append("version=").append(SCRIPT_VERSION).append('\n');
+        report.append("phase=").append(phase).append('\n');
+        report.append("reason=").append(reason).append('\n');
+        report.append("runtime=").append(stats == null ? "-" : stats.runtimeText()).append('\n');
+        report.append("status=").append(stats == null ? "-" : stats.status).append('\n');
+        report.append("activeMethod=").append(activeMethod == null ? "-" : activeMethod.key).append('\n');
+        report.append("activeQuote=").append(activeQuote == null ? "-" : activeQuote.profitPerCast + " gp/cast").append('\n');
+        report.append("casts=").append(stats == null ? 0 : stats.casts).append('\n');
+        report.append("batch=").append(activeBatchCasts).append('/').append(activeBatchTargetCasts).append('\n');
+        report.append("pendingGe=").append(pendingGeActions.size()).append('\n');
+        report.append("placedGe=").append(placedGeActions.size()).append('\n');
+        report.append("enchantCycleActive=").append(enchantInventoryCycleActive).append('\n');
+        report.append("location=").append(locationText(ctx)).append('\n');
+        report.append("vars=").append(varsSnapshot(ctx)).append('\n');
+        report.append("stateSignature=").append(stateSignature(ctx)).append('\n');
+        report.append("inventory=").append(itemSummary(ctx.inventory().getItems())).append('\n');
+        report.append("equipment=").append(itemSummary(ctx.equipment().getItems())).append('\n');
+        report.append("spellWidgets=").append(spellbookWidgetsSummary(ctx)).append('\n');
+        report.append("lastChat=").append(stats == null ? "-" : stats.lastChat).append('\n');
+        report.append("lastGeAction=").append(stats == null ? "-" : stats.lastGeAction).append('\n');
+        report.append("recentEvents:\n");
+        if (stats == null || stats.recentEvents(80).isEmpty()) {
+            report.append("- none\n");
+        } else {
+            for (String event : stats.recentEvents(80)) {
+                report.append("- ").append(event).append('\n');
+            }
+        }
+        return report.toString();
+    }
+
+    private String spellbookWidgetsSummary(APIContext ctx) {
+        StringBuilder summary = new StringBuilder();
+        int[] children = {
+                JEWELLERY_ENCHANTMENTS_CHILD,
+                LEVEL_1_ENCHANT_CHILD,
+                LEVEL_2_ENCHANT_CHILD,
+                LEVEL_3_ENCHANT_CHILD,
+                LEVEL_4_ENCHANT_CHILD
+        };
+        for (int child : children) {
+            if (summary.length() > 0) {
+                summary.append(" | ");
+            }
+            summary.append("218.").append(child).append('=')
+                    .append(widgetSummary(ctx.widgets().get(SPELLBOOK_GROUP, child)));
+        }
+        return shortText(summary.toString(), 2600);
+    }
+
     private static class EnchantMethod {
         private final String key;
         private final String label;
         private final int requiredMagic;
         private final Spell spell;
         private final int spellWidgetChild;
+        private final String expectedSpellText;
         private final String staff;
         private final String inputItem;
         private final String outputItem;
@@ -1341,6 +1998,7 @@ public class EnchantJewelleryProfitScript extends Script {
                 int requiredMagic,
                 Spell spell,
                 int spellWidgetChild,
+                String expectedSpellText,
                 String staff,
                 String inputItem,
                 String outputItem,
@@ -1354,6 +2012,7 @@ public class EnchantJewelleryProfitScript extends Script {
             this.requiredMagic = requiredMagic;
             this.spell = spell;
             this.spellWidgetChild = spellWidgetChild;
+            this.expectedSpellText = expectedSpellText;
             this.staff = staff;
             this.inputItem = inputItem;
             this.outputItem = outputItem;
@@ -1495,7 +2154,12 @@ public class EnchantJewelleryProfitScript extends Script {
     }
 
     private static class Stats {
+        private static final int MAX_RECENT_EVENTS = 220;
+        private static final DateTimeFormatter EVENT_TIME_FORMAT =
+                DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
+
         private final long startedAt = System.currentTimeMillis();
+        private final ArrayDeque<String> recentEvents = new ArrayDeque<>();
         private int startingMagicXp = -1;
         private int casts;
         private String status = "Starting";
@@ -1530,7 +2194,27 @@ public class EnchantJewelleryProfitScript extends Script {
         }
 
         private void setStatus(String status) {
-            this.status = status == null ? "-" : status;
+            String next = status == null ? "-" : status;
+            if (!next.equals(this.status)) {
+                recordEvent("STATUS " + next);
+            }
+            this.status = next;
+        }
+
+        private void recordEvent(String event) {
+            String timestamp = LocalDateTime.now().format(EVENT_TIME_FORMAT);
+            recentEvents.addLast(timestamp + " " + (event == null ? "-" : event));
+            while (recentEvents.size() > MAX_RECENT_EVENTS) {
+                recentEvents.removeFirst();
+            }
+        }
+
+        private List<String> recentEvents(int max) {
+            List<String> events = new ArrayList<>(recentEvents);
+            if (events.size() <= max) {
+                return events;
+            }
+            return events.subList(events.size() - max, events.size());
         }
     }
 }
