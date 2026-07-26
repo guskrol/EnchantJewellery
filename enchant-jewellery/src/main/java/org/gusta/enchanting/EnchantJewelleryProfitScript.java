@@ -43,7 +43,7 @@ import java.util.regex.Pattern;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.2.1-no-ready-walk-logs";
+    private static final String SCRIPT_VERSION = "v0.2.2-enchant-before-walking";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -302,6 +302,28 @@ public class EnchantJewelleryProfitScript extends Script {
 
             stats.startExperienceIfNeeded(ctx);
 
+            if (enchantInventoryCycleActive && activeMethod != null) {
+                debugLog("Continuing active enchant cycle before location gate. method="
+                        + activeMethod.label + " location=" + locationText(ctx));
+                enchantInventory(ctx, activeMethod);
+                return;
+            }
+
+            EnchantMethod readyMethod = readyEnchantMethod(ctx);
+            if (readyMethod != null) {
+                if (activeMethod == null || !activeMethod.key.equals(readyMethod.key)) {
+                    activeMethod = readyMethod;
+                    activeQuote = pricing.quote(ctx, readyMethod);
+                    nextMethodRefreshAt = System.currentTimeMillis() + METHOD_REFRESH_MS;
+                }
+                debugLog("Enchant inventory ready before location gate. method="
+                        + readyMethod.label
+                        + " location=" + locationText(ctx)
+                        + " inventory=" + inventoryState(ctx, readyMethod));
+                enchantInventory(ctx, readyMethod);
+                return;
+            }
+
             if (!ensureAtGrandExchangeBeforeActions(ctx)) {
                 return;
             }
@@ -315,11 +337,6 @@ public class EnchantJewelleryProfitScript extends Script {
                 stats.setStatus("Closing GE before enchanting");
                 ctx.grandExchange().close();
                 Time.sleep(600, 900, () -> !ctx.grandExchange().isOpen(), 100);
-                return;
-            }
-
-            if (enchantInventoryCycleActive && activeMethod != null) {
-                enchantInventory(ctx, activeMethod);
                 return;
             }
 
@@ -677,7 +694,25 @@ public class EnchantJewelleryProfitScript extends Script {
         return inventoryReadyForEnchant(ctx, method) && !ctx.bank().isOpen();
     }
 
+    private EnchantMethod readyEnchantMethod(APIContext ctx) {
+        if (ctx == null || ctx.bank().isOpen()) {
+            return null;
+        }
+        if (activeMethod != null && inventoryReadyForEnchant(ctx, activeMethod)) {
+            return activeMethod;
+        }
+        for (EnchantMethod method : METHODS) {
+            if (inventoryReadyForEnchant(ctx, method)) {
+                return method;
+            }
+        }
+        return null;
+    }
+
     private boolean inventoryReadyForEnchant(APIContext ctx, EnchantMethod method) {
+        if (ctx == null || method == null) {
+            return false;
+        }
         return ctx.inventory().getCount(method.inputItem) > 0
                 && ctx.inventory().getCount(true, COSMIC_RUNE) > 0
                 && ctx.equipment().contains(method.staff);
@@ -853,7 +888,11 @@ public class EnchantJewelleryProfitScript extends Script {
 
             stats.setStatus("Opening Jewellery Enchantments via 218." + JEWELLERY_ENCHANTMENTS_CHILD);
             humanWidgetPause();
-            clickWidgetActions(ctx, jewelleryEnchantments, "Open", "View", "Cast");
+            boolean opened = interactWidgetActionsOnly(jewelleryEnchantments, "Open", "View", "Cast");
+            debugLog("Jewellery menu click. method=" + method.label
+                    + " clicked=" + opened
+                    + " widget=" + widgetDebug(jewelleryEnchantments)
+                    + " location=" + locationText(ctx));
             Time.sleep(
                     HUMAN_WIDGET_MIN_MS,
                     HUMAN_WIDGET_MAX_MS,
@@ -879,18 +918,20 @@ public class EnchantJewelleryProfitScript extends Script {
 
         stats.setStatus("Selecting " + method.spell.getSpellName() + " via 218." + method.spellWidgetChild);
         humanWidgetPause();
-        boolean clicked = clickWidgetActions(ctx, spellWidget, "Cast", method.spell.getSpellName());
+        boolean clicked = interactWidgetActionsOnly(spellWidget, "Cast", method.spell.getSpellName());
+        debugLog("Enchant spell widget click. method=" + method.label
+                + " clicked=" + clicked
+                + " widget=" + widgetDebug(spellWidget)
+                + " location=" + locationText(ctx));
         Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.magic().isSpellSelected(), 100);
 
         if (!ctx.magic().isSpellSelected()) {
             humanWidgetPause();
-            clicked = clickWidgetCenter(ctx, spellWidget) || clicked;
-            Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.magic().isSpellSelected(), 100);
-        }
-
-        if (!ctx.magic().isSpellSelected()) {
-            humanWidgetPause();
-            clicked = spellWidget.click() || clicked;
+            clicked = interactWidgetActionsOnly(spellWidget, "Cast", method.spell.getSpellName()) || clicked;
+            debugLog("Enchant spell widget retry. method=" + method.label
+                    + " clicked=" + clicked
+                    + " spellSelected=" + ctx.magic().isSpellSelected()
+                    + " location=" + locationText(ctx));
             Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.magic().isSpellSelected(), 100);
         }
 
@@ -927,8 +968,7 @@ public class EnchantJewelleryProfitScript extends Script {
 
         if (directClickExpected) {
             clicked = ctx.inventory().interactItem("Cast", method.inputItem)
-                    || item.interact("Cast")
-                    || item.click(false);
+                    || item.interact("Cast");
         }
 
         if (!clicked) {
@@ -960,6 +1000,18 @@ public class EnchantJewelleryProfitScript extends Script {
         }
 
         return clickWidgetCenter(ctx, widget) || widget.click();
+    }
+
+    private boolean interactWidgetActionsOnly(WidgetChild widget, String... actions) {
+        if (!isVisibleWidget(widget)) {
+            return false;
+        }
+        for (String action : actions) {
+            if (action != null && !action.isBlank() && widget.interact(action)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean openMagicTab(APIContext ctx) {
@@ -1537,6 +1589,25 @@ public class EnchantJewelleryProfitScript extends Script {
                 + ",y=" + safeCount(item::getY)
                 + ",w=" + safeCount(item::getWidth)
                 + ",h=" + safeCount(item::getHeight)
+                + ",bounds=" + bounds
+                + "}";
+    }
+
+    private String widgetDebug(WidgetChild widget) {
+        if (widget == null) {
+            return "null";
+        }
+        Rectangle bounds;
+        try {
+            bounds = widget.getBounds();
+        } catch (RuntimeException ignored) {
+            bounds = null;
+        }
+        return "{parent=" + safeCount(widget::getParentId)
+                + ",child=" + safeCount(widget::getChildId)
+                + ",idx=" + safeCount(widget::getIndex)
+                + ",w=" + safeCount(widget::getWidth)
+                + ",h=" + safeCount(widget::getHeight)
                 + ",bounds=" + bounds
                 + "}";
     }
