@@ -32,7 +32,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.26-panel-relative-spellbook-clicks";
+    private static final String SCRIPT_VERSION = "v0.1.27-sell-output-on-method-switch";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int FIXED_CANVAS_WIDTH = 765;
     private static final int FIXED_CANVAS_HEIGHT = 503;
@@ -89,6 +89,7 @@ public class EnchantJewelleryProfitScript extends Script {
     private Stats stats;
     private EnchantMethod activeMethod;
     private EnchantMethod previousMethod;
+    private EnchantMethod pendingSwitchOutputSaleMethod;
     private Quote activeQuote;
     private int activeBatchTargetCasts;
     private int activeBatchCasts;
@@ -295,7 +296,13 @@ public class EnchantJewelleryProfitScript extends Script {
 
         stoppedForNoProfit = false;
         Quote selected = pickWeightedQuote(ctx, quotes);
-        previousMethod = activeMethod;
+        EnchantMethod oldMethod = activeMethod;
+        boolean switchingMethod = oldMethod != null && !oldMethod.key.equals(selected.method.key);
+        previousMethod = oldMethod;
+        if (switchingMethod) {
+            pendingSwitchOutputSaleMethod = oldMethod;
+            trace(ctx, oldMethod, "method-switch:force-output-sale new=" + selected.method.key);
+        }
         activeMethod = selected.method;
         activeQuote = selected;
         activeBatchTargetCasts = ThreadLocalRandom.current().nextInt(MIN_BATCH_CASTS, MAX_BATCH_CASTS + 1);
@@ -365,6 +372,10 @@ public class EnchantJewelleryProfitScript extends Script {
         }
 
         if (depositInventoryIfNeeded(ctx, method)) {
+            return;
+        }
+
+        if (preparePendingSwitchOutputSale(ctx)) {
             return;
         }
 
@@ -562,7 +573,43 @@ public class EnchantJewelleryProfitScript extends Script {
         return totalOutput >= MIN_OUTPUTS_TO_SELL || (!hasMaterials && coins < MIN_COINS_RESERVE);
     }
 
-    private void prepareOutputSale(APIContext ctx, EnchantMethod method) {
+    private boolean preparePendingSwitchOutputSale(APIContext ctx) {
+        EnchantMethod sellMethod = pendingSwitchOutputSaleMethod;
+        if (sellMethod == null) {
+            return false;
+        }
+
+        if (activeMethod != null && activeMethod.key.equals(sellMethod.key)) {
+            pendingSwitchOutputSaleMethod = null;
+            return false;
+        }
+
+        int inventoryOutput = ctx.inventory().getCount(true, sellMethod.outputItem);
+        int bankOutput = ctx.bank().isOpen() ? ctx.bank().getCount(sellMethod.outputItem) : 0;
+        if (inventoryOutput + bankOutput <= 0) {
+            trace(ctx, sellMethod, "method-switch:no-output-to-sell");
+            pendingSwitchOutputSaleMethod = null;
+            return false;
+        }
+
+        stats.setStatus("Selling previous output before switch: " + sellMethod.outputItem);
+        Quote sellQuote = pricing.quote(ctx, sellMethod);
+        int pendingBefore = pendingGeActions.size();
+        boolean acted = prepareOutputSale(ctx, sellMethod, sellQuote.hasPrices() ? sellQuote : null);
+        if (pendingGeActions.size() > pendingBefore) {
+            pendingSwitchOutputSaleMethod = null;
+            trace(ctx, sellMethod, "method-switch:queued-output-sale new="
+                    + (activeMethod == null ? "-" : activeMethod.key));
+        }
+        return acted;
+    }
+
+    private boolean prepareOutputSale(APIContext ctx, EnchantMethod method) {
+        Quote quote = activeQuote != null && activeQuote.method.key.equals(method.key) ? activeQuote : null;
+        return prepareOutputSale(ctx, method, quote);
+    }
+
+    private boolean prepareOutputSale(APIContext ctx, EnchantMethod method, Quote quote) {
         int inventoryOutput = ctx.inventory().getCount(true, method.outputItem);
         if (inventoryOutput <= 0) {
             stats.setStatus("Withdrawing " + method.outputItem + " as notes to sell");
@@ -575,16 +622,17 @@ public class EnchantJewelleryProfitScript extends Script {
 
         if (inventoryOutput <= 0) {
             stats.setStatus("Wanted to sell output, but no " + method.outputItem + " was found");
-            return;
+            return false;
         }
 
-        int sellPrice = activeQuote == null
+        int sellPrice = quote == null
                 ? pricing.quickSellPrice(ctx, method.outputItem, method.fallbackOutputSell)
-                : pricing.quickSellPrice(ctx, method.outputItem, activeQuote.outputSellPrice);
+                : pricing.quickSellPrice(ctx, method.outputItem, quote.outputSellPrice);
         pendingGeActions.add(GeAction.sell(method.outputItem, inventoryOutput, sellPrice));
         stats.lastGeAction = "Queued sale " + inventoryOutput + "x " + method.outputItem + " @ " + sellPrice;
         log(stats.lastGeAction);
         closeBank(ctx, "Going to GE to sell " + method.outputItem);
+        return true;
     }
 
     private boolean hasEnchantInventory(APIContext ctx, EnchantMethod method) {
