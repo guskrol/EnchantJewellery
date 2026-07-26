@@ -32,10 +32,14 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.23-resizable-spellbook-coords";
+    private static final String SCRIPT_VERSION = "v0.1.24-force-21815-confirm-spell";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int FIXED_CANVAS_WIDTH = 765;
     private static final int FIXED_CANVAS_HEIGHT = 503;
+    private static final int FIXED_INVENTORY_GRID_X = 563;
+    private static final int FIXED_INVENTORY_GRID_Y = 213;
+    private static final int FIXED_INVENTORY_GRID_WIDTH = 174;
+    private static final int FIXED_INVENTORY_GRID_HEIGHT = 252;
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
     private static final int GE_MIN_Y = 3465;
@@ -104,6 +108,7 @@ public class EnchantJewelleryProfitScript extends Script {
     private long nextTraceAt;
     private String lastTraceSignature = "";
     private long lastSpellWidgetClickAt;
+    private int consecutiveSpellSelectionFailures;
     private boolean forceSpellSelectionForNextInventory;
     private EnchantPhase enchantPhase = EnchantPhase.IDLE;
     private boolean wrongSpellDetected;
@@ -879,33 +884,33 @@ public class EnchantJewelleryProfitScript extends Script {
             return false;
         }
 
+        if (!ctx.tabs().isOpen(ITabsAPI.Tabs.INVENTORY) && !openInventoryTab(ctx)) {
+            return failSpellSelection(ctx, method, "spell:open-inventory-before-panel-failed");
+        }
+        Rectangle inventoryPanel = inventoryGridBounds(ctx);
+        trace(ctx, method, "spell:inventory-panel-before-magic panel=" + rectangleText(inventoryPanel));
+
         setEnchantPhase(EnchantPhase.SELECTING_SPELL);
         if (!openMagicTab(ctx)) {
-            trace(ctx, method, "spell:open-magic-tab-failed");
-            return false;
+            return failSpellSelection(ctx, method, "spell:open-magic-tab-failed");
         }
+
+        stats.setStatus("Opening Jewellery Enchantments via primitive 218." + JEWELLERY_ENCHANTMENTS_CHILD);
+        if (!clickSpellbookWidgetPrimitive(ctx, JEWELLERY_ENCHANTMENTS_CHILD, "Jewellery Enchantments", inventoryPanel)) {
+            return failSpellSelection(ctx, method, "spell:open-jewellery-primitive-click-failed");
+        }
+        Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS,
+                () -> isVisibleWidget(ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild)),
+                100);
 
         WidgetChild spellWidget = ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild);
         if (!isVisibleWidget(spellWidget)) {
-            stats.setStatus("Opening Jewellery Enchantments via primitive 218." + JEWELLERY_ENCHANTMENTS_CHILD);
-            if (!clickSpellbookWidgetPrimitive(ctx, JEWELLERY_ENCHANTMENTS_CHILD, "Jewellery Enchantments")) {
-                trace(ctx, method, "spell:open-jewellery-primitive-click-failed");
-                return false;
-            }
-            Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS,
-                    () -> isVisibleWidget(ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild)),
-                    100);
-        }
-
-        spellWidget = ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild);
-        if (!isVisibleWidget(spellWidget)) {
             stats.setStatus("Enchant widget missing after opening: 218." + method.spellWidgetChild);
-            trace(ctx, method, "spell:target-widget-missing-after-open");
-            return false;
+            return failSpellSelection(ctx, method, "spell:target-widget-missing-after-open");
         }
 
         stats.setStatus("Selecting " + method.spell.getSpellName() + " via primitive 218." + method.spellWidgetChild);
-        boolean clicked = clickSpellbookWidgetPrimitive(ctx, method.spellWidgetChild, method.spell.getSpellName());
+        boolean clicked = clickSpellbookWidgetPrimitive(ctx, method.spellWidgetChild, method.spell.getSpellName(), inventoryPanel);
         Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS,
                 () -> ctx.magic().isSpellSelected() || wrongSpellDetected,
                 100);
@@ -913,21 +918,20 @@ public class EnchantJewelleryProfitScript extends Script {
         if (wrongSpellDetected) {
             forceSpellSelectionForNextInventory = true;
             lastSpellWidgetClickAt = 0L;
-            trace(ctx, method, "spell:wrong-spell-after-primitive-click");
-            return false;
+            return failSpellSelection(ctx, method, "spell:wrong-spell-after-primitive-click");
         }
 
-        if (clicked) {
+        if (ctx.magic().isSpellSelected()) {
             lastSpellWidgetClickAt = System.currentTimeMillis();
             forceSpellSelectionForNextInventory = false;
-            trace(ctx, method, "spell:primitive-click-accepted apiSpellSelected=" + ctx.magic().isSpellSelected());
+            consecutiveSpellSelectionFailures = 0;
+            trace(ctx, method, "spell:selected-after-primitive-click clicked=" + clicked);
             return true;
         }
 
         forceSpellSelectionForNextInventory = true;
         lastSpellWidgetClickAt = 0L;
-        trace(ctx, method, "spell:primitive-click-failed");
-        return false;
+        return failSpellSelection(ctx, method, "spell:not-selected-after-primitive-click clicked=" + clicked);
     }
 
     private boolean clickEnchantMaterial(APIContext ctx, EnchantMethod method) {
@@ -978,7 +982,7 @@ public class EnchantJewelleryProfitScript extends Script {
         return clicked;
     }
 
-    private boolean clickSpellbookWidgetPrimitive(APIContext ctx, int child, String label) {
+    private boolean clickSpellbookWidgetPrimitive(APIContext ctx, int child, String label, Rectangle inventoryPanel) {
         WidgetChild widget = ctx.widgets().get(SPELLBOOK_GROUP, child);
         if (!isVisibleWidget(widget)) {
             return false;
@@ -995,12 +999,13 @@ public class EnchantJewelleryProfitScript extends Script {
             trace(ctx, activeMethod, "primitive-widget:no-point child=" + child + " label=" + label);
             return false;
         }
-        Point point = translateFixedSpellbookPoint(ctx, rawPoint);
-        if (!isSpellbookPanelPoint(ctx, point)) {
+        Point point = translateFixedSpellbookPoint(ctx, rawPoint, inventoryPanel);
+        if (!isSpellbookPanelPoint(ctx, point, inventoryPanel)) {
             trace(ctx, activeMethod, "primitive-widget:refused-outside-spellbook-panel child=" + child
                     + " label='" + label + "'"
                     + " raw=" + rawPoint.x + "," + rawPoint.y
                     + " translated=" + point.x + "," + point.y
+                    + " panel=" + rectangleText(inventoryPanel)
                     + " canvas=" + ctx.client().getCanvasWidth() + "x" + ctx.client().getCanvasHeight());
             return false;
         }
@@ -1010,6 +1015,7 @@ public class EnchantJewelleryProfitScript extends Script {
                 + " rawPoint=" + rawPoint.x + "," + rawPoint.y
                 + " translatedPoint=" + point.x + "," + point.y
                 + " bounds=" + bounds.x + "," + bounds.y + "," + bounds.width + "," + bounds.height
+                + " panel=" + rectangleText(inventoryPanel)
                 + " canvas=" + ctx.client().getCanvasWidth() + "x" + ctx.client().getCanvasHeight());
         if (!ctx.mouse().move(point)) {
             trace(ctx, activeMethod, "primitive-widget:move-failed child=" + child + " label=" + label);
@@ -1026,13 +1032,20 @@ public class EnchantJewelleryProfitScript extends Script {
         return clicked;
     }
 
-    private Point translateFixedSpellbookPoint(APIContext ctx, Point rawPoint) {
+    private Point translateFixedSpellbookPoint(APIContext ctx, Point rawPoint, Rectangle inventoryPanel) {
         int canvasWidth = Math.max(1, ctx.client().getCanvasWidth());
         int canvasHeight = Math.max(1, ctx.client().getCanvasHeight());
         int x = rawPoint.x;
         int y = rawPoint.y;
 
-        if (canvasWidth > FIXED_CANVAS_WIDTH + 100
+        if (inventoryPanel != null
+                && rawPoint.x <= FIXED_CANVAS_WIDTH
+                && rawPoint.y <= FIXED_CANVAS_HEIGHT) {
+            double xRatio = (double) (rawPoint.x - FIXED_INVENTORY_GRID_X) / FIXED_INVENTORY_GRID_WIDTH;
+            double yRatio = (double) (rawPoint.y - FIXED_INVENTORY_GRID_Y) / FIXED_INVENTORY_GRID_HEIGHT;
+            x = inventoryPanel.x + (int) Math.round(xRatio * inventoryPanel.width);
+            y = inventoryPanel.y + (int) Math.round(yRatio * inventoryPanel.height);
+        } else if (canvasWidth > FIXED_CANVAS_WIDTH + 100
                 && canvasHeight > FIXED_CANVAS_HEIGHT + 100
                 && rawPoint.x <= FIXED_CANVAS_WIDTH
                 && rawPoint.y <= FIXED_CANVAS_HEIGHT) {
@@ -1045,12 +1058,20 @@ public class EnchantJewelleryProfitScript extends Script {
         return new Point(x, y);
     }
 
-    private boolean isSpellbookPanelPoint(APIContext ctx, Point point) {
+    private boolean isSpellbookPanelPoint(APIContext ctx, Point point, Rectangle inventoryPanel) {
         if (point == null) {
             return false;
         }
         int canvasWidth = Math.max(1, ctx.client().getCanvasWidth());
         int canvasHeight = Math.max(1, ctx.client().getCanvasHeight());
+
+        if (inventoryPanel != null) {
+            int left = Math.max(0, inventoryPanel.x - 36);
+            int top = Math.max(0, inventoryPanel.y - 140);
+            int right = Math.min(canvasWidth, inventoryPanel.x + inventoryPanel.width + 100);
+            int bottom = Math.min(canvasHeight, inventoryPanel.y + inventoryPanel.height + 90);
+            return point.x >= left && point.x < right && point.y >= top && point.y < bottom;
+        }
 
         if (canvasWidth <= FIXED_CANVAS_WIDTH + 100 || canvasHeight <= FIXED_CANVAS_HEIGHT + 100) {
             return point.x >= 520
@@ -1065,6 +1086,55 @@ public class EnchantJewelleryProfitScript extends Script {
                 && point.x < canvasWidth
                 && point.y >= panelTop
                 && point.y < canvasHeight;
+    }
+
+    private boolean failSpellSelection(APIContext ctx, EnchantMethod method, String event) {
+        consecutiveSpellSelectionFailures++;
+        forceSpellSelectionForNextInventory = true;
+        lastSpellWidgetClickAt = 0L;
+        trace(ctx, method, event + " failures=" + consecutiveSpellSelectionFailures);
+        if (consecutiveSpellSelectionFailures >= 3) {
+            String reason = "Enchant spell selection failed 3x; paused to avoid loop";
+            stats.setStatus(reason);
+            trace(ctx, method, "spell:paused-after-selection-failures");
+            ctx.script().pause(reason);
+        }
+        return false;
+    }
+
+    private Rectangle inventoryGridBounds(APIContext ctx) {
+        int minX = Integer.MAX_VALUE;
+        int minY = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE;
+        int maxY = Integer.MIN_VALUE;
+        int count = 0;
+
+        for (ItemWidget item : ctx.inventory().getItems()) {
+            if (item == null) {
+                continue;
+            }
+            Rectangle bounds = item.getBounds();
+            if (bounds == null || bounds.width <= 0 || bounds.height <= 0) {
+                continue;
+            }
+            minX = Math.min(minX, bounds.x);
+            minY = Math.min(minY, bounds.y);
+            maxX = Math.max(maxX, bounds.x + bounds.width);
+            maxY = Math.max(maxY, bounds.y + bounds.height);
+            count++;
+        }
+
+        if (count < 4) {
+            return null;
+        }
+        return new Rectangle(minX, minY, Math.max(1, maxX - minX), Math.max(1, maxY - minY));
+    }
+
+    private String rectangleText(Rectangle rectangle) {
+        if (rectangle == null) {
+            return "null";
+        }
+        return rectangle.x + "," + rectangle.y + "," + rectangle.width + "," + rectangle.height;
     }
 
     private boolean clickWidgetActions(APIContext ctx, WidgetChild widget, String... actions) {
