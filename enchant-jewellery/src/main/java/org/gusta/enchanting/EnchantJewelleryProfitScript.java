@@ -32,7 +32,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.18-trace-recovery";
+    private static final String SCRIPT_VERSION = "v0.1.19-exact-widget-sequence";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -837,80 +837,44 @@ public class EnchantJewelleryProfitScript extends Script {
     }
 
     private boolean selectSpellAndClickItem(APIContext ctx, EnchantMethod method) {
-        setEnchantPhase(EnchantPhase.CASTING);
-        if (ctx.magic().canCast(method.spell)) {
-            trace(ctx, method, "cast:api-cast-spell-on-item");
-            boolean cast = ctx.magic().cast(method.spell, method.inputItem);
-            Time.sleep(550, 950, () -> ctx.localPlayer().isAnimating()
-                    || ctx.inventory().getCount(method.inputItem) <= 0
-                    || ctx.inventory().contains(method.outputItem)
-                    || wrongSpellDetected, 100);
-            if (wrongSpellDetected) {
-                trace(ctx, method, "cast:wrong-spell-detected-after-api");
-                return false;
-            }
-            if (cast || ctx.localPlayer().isAnimating()) {
-                forceSpellSelectionForNextInventory = false;
-                lastSpellWidgetClickAt = System.currentTimeMillis();
-                trace(ctx, method, "cast:api-started cast=" + cast);
-                return true;
-            }
-        }
-
         setEnchantPhase(EnchantPhase.SELECTING_SPELL);
-        trace(ctx, method, "cast:select-spell-fallback");
+        trace(ctx, method, "cast:exact-widget-sequence-start");
         if (!selectJewelleryEnchantSpell(ctx, method) || wrongSpellDetected) {
-            trace(ctx, method, "cast:select-spell-failed wrongSpell=" + wrongSpellDetected);
+            trace(ctx, method, "cast:exact-widget-sequence-failed wrongSpell=" + wrongSpellDetected);
             return false;
         }
 
         forceSpellSelectionForNextInventory = false;
         humanWidgetPause();
-        if (!ctx.magic().isSpellSelected()) {
-            stats.setStatus("Spell was not selected; not clicking material");
-            trace(ctx, method, "cast:spell-not-selected-before-item");
-            return false;
-        }
 
         if (!openInventoryTab(ctx)) {
+            trace(ctx, method, "cast:open-inventory-failed");
             return false;
         }
         humanItemPause();
         setEnchantPhase(EnchantPhase.CLICKING_MATERIAL);
-        trace(ctx, method, "cast:click-material");
+        trace(ctx, method, "cast:click-material-after-exact-218-16");
         return clickEnchantMaterial(ctx, method);
     }
 
     private boolean selectJewelleryEnchantSpell(APIContext ctx, EnchantMethod method) {
-        if (ctx.magic().isSpellSelected()) {
-            trace(ctx, method, "select-spell:already-selected");
-            return true;
-        }
-
-        if (!ctx.magic().canCast(method.spell)) {
-            stats.setStatus("Cannot cast " + method.spell.getSpellName());
-            trace(ctx, method, "select-spell:cannot-cast");
+        if (magicLevel(ctx) < method.requiredMagic) {
+            stats.setStatus("Magic level " + method.requiredMagic + " required for " + method.spell.getSpellName());
+            trace(ctx, method, "select-spell:level-too-low");
             return false;
         }
 
-        stats.setStatus("Selecting " + method.spell.getSpellName() + " via magic API");
-        trace(ctx, method, "select-spell:magic-api");
-        if (ctx.magic().cast(method.spell)) {
-            Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS,
-                    () -> ctx.magic().isSpellSelected() || wrongSpellDetected,
-                    100);
-            if (ctx.magic().isSpellSelected() && !wrongSpellDetected) {
-                lastSpellWidgetClickAt = System.currentTimeMillis();
-                trace(ctx, method, "select-spell:selected");
-                return true;
-            }
+        if (!openMagicTab(ctx)) {
+            trace(ctx, method, "select-spell:open-magic-tab-failed");
+            return false;
         }
 
-        stats.setStatus("Magic API did not select spell; retrying safely");
-        forceSpellSelectionForNextInventory = true;
-        lastSpellWidgetClickAt = 0L;
-        trace(ctx, method, "select-spell:api-failed");
-        return false;
+        if (!openJewelleryEnchantments(ctx, method)) {
+            trace(ctx, method, "select-spell:open-jewellery-menu-failed");
+            return false;
+        }
+
+        return clickEnchantSpellWidget(ctx, method);
     }
 
     private boolean openJewelleryEnchantments(APIContext ctx, EnchantMethod method) {
@@ -923,8 +887,11 @@ public class EnchantJewelleryProfitScript extends Script {
 
             stats.setStatus("Opening Jewellery Enchantments via 218." + JEWELLERY_ENCHANTMENTS_CHILD);
             humanWidgetPause();
-            boolean opened = clickWidgetByMouse(ctx, jewelleryEnchantments)
-                    || clickWidgetActions(ctx, jewelleryEnchantments, "Open", "View", "Cast");
+            boolean opened = clickExactWidget(ctx, jewelleryEnchantments);
+            trace(ctx, method, "select-spell:click-218-" + JEWELLERY_ENCHANTMENTS_CHILD
+                    + " attempt=" + attempt
+                    + " clicked=" + opened
+                    + " widget=" + widgetSummary(jewelleryEnchantments));
             Time.sleep(
                     HUMAN_WIDGET_MIN_MS,
                     HUMAN_WIDGET_MAX_MS,
@@ -933,6 +900,7 @@ public class EnchantJewelleryProfitScript extends Script {
             );
 
             if (isVisibleWidget(ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild))) {
+                trace(ctx, method, "select-spell:jewellery-menu-open");
                 return true;
             }
         }
@@ -948,35 +916,36 @@ public class EnchantJewelleryProfitScript extends Script {
             return false;
         }
 
-        stats.setStatus("Selecting " + method.spell.getSpellName() + " via 218." + method.spellWidgetChild);
+        stats.setStatus("Clicking " + method.spell.getSpellName() + " via exact 218." + method.spellWidgetChild);
         humanWidgetPause();
-        boolean clicked = clickWidgetByMouse(ctx, spellWidget)
-                || clickWidgetCenter(ctx, spellWidget)
-                || clickWidgetActions(ctx, spellWidget, "Cast", method.spell.getSpellName());
-        Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.magic().isSpellSelected(), 100);
+        boolean clicked = clickExactWidget(ctx, spellWidget);
+        trace(ctx, method, "select-spell:click-218-" + method.spellWidgetChild
+                + " clicked=" + clicked
+                + " widget=" + widgetSummary(spellWidget));
+        Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS,
+                () -> ctx.magic().isSpellSelected() || wrongSpellDetected,
+                100);
 
-        if (!ctx.magic().isSpellSelected()) {
-            humanWidgetPause();
-            clicked = clickWidgetByRandomPoint(ctx, spellWidget) || clicked;
-            Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.magic().isSpellSelected(), 100);
-        }
-
-        if (!ctx.magic().isSpellSelected()) {
-            humanWidgetPause();
-            clicked = clickWidgetActions(ctx, spellWidget, "Cast", method.spell.getSpellName()) || clicked;
-            Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.magic().isSpellSelected(), 100);
-        }
-
-        if (!ctx.magic().isSpellSelected() || wrongSpellDetected) {
-            stats.setStatus("Spell selection not detected; retrying later");
+        if (wrongSpellDetected) {
+            stats.setStatus("Wrong enchant spell detected; retrying Lvl-1 path");
             forceSpellSelectionForNextInventory = true;
             lastSpellWidgetClickAt = 0L;
             return false;
         }
+
         if (clicked || ctx.magic().isSpellSelected()) {
             lastSpellWidgetClickAt = System.currentTimeMillis();
+            forceSpellSelectionForNextInventory = false;
+            trace(ctx, method, "select-spell:accepted-after-218-" + method.spellWidgetChild
+                    + " apiSpellSelected=" + ctx.magic().isSpellSelected());
+            return true;
         }
-        return true;
+
+        stats.setStatus("Lvl-1 Enchant click failed; retrying later");
+        forceSpellSelectionForNextInventory = true;
+        lastSpellWidgetClickAt = 0L;
+        trace(ctx, method, "select-spell:click-failed");
+        return false;
     }
 
     private boolean clickEnchantMaterial(APIContext ctx, EnchantMethod method) {
@@ -988,21 +957,49 @@ public class EnchantJewelleryProfitScript extends Script {
 
         stats.setStatus("Clicking material after spell: " + method.inputItem);
         humanItemPause();
-        boolean directClickExpected = ctx.magic().isSpellSelected();
+        long millisSinceSpellClick = System.currentTimeMillis() - lastSpellWidgetClickAt;
+        boolean directClickExpected = ctx.magic().isSpellSelected()
+                || (lastSpellWidgetClickAt > 0L && millisSinceSpellClick < 8_000L);
         if (!directClickExpected) {
-            stats.setStatus("Spell not selected; refusing material click");
+            stats.setStatus("No recent Lvl-1 Enchant click; refusing material click");
             forceSpellSelectionForNextInventory = true;
             lastSpellWidgetClickAt = 0L;
-            trace(ctx, method, "item:refused-no-spell-selected");
+            trace(ctx, method, "item:refused-no-recent-spell-click");
             return false;
         }
-        boolean clicked = false;
 
-        clicked = clickInventoryItemByMouse(ctx, item) || item.click(false);
-        trace(ctx, method, "item:clicked=" + clicked);
+        int inputBefore = ctx.inventory().getCount(true, method.inputItem);
+        int outputBefore = ctx.inventory().getCount(true, method.outputItem);
+        boolean clicked = clickInventoryItemByMouse(ctx, item) || item.click(false);
+        trace(ctx, method, "item:clicked=" + clicked
+                + " apiSpellSelected=" + ctx.magic().isSpellSelected()
+                + " sinceSpellMs=" + millisSinceSpellClick
+                + " inputBefore=" + inputBefore
+                + " outputBefore=" + outputBefore);
 
-        Time.sleep(HUMAN_ITEM_MIN_MS, HUMAN_ITEM_MAX_MS);
+        Time.sleep(HUMAN_ITEM_MIN_MS, HUMAN_ITEM_MAX_MS,
+                () -> ctx.localPlayer().isAnimating()
+                        || ctx.inventory().getCount(true, method.outputItem) > outputBefore
+                        || ctx.inventory().getCount(true, method.inputItem) < inputBefore
+                        || wrongSpellDetected,
+                100);
+        trace(ctx, method, "item:after-click inputNow=" + ctx.inventory().getCount(true, method.inputItem)
+                + " outputNow=" + ctx.inventory().getCount(true, method.outputItem)
+                + " animating=" + ctx.localPlayer().isAnimating());
         return clicked;
+    }
+
+    private boolean clickExactWidget(APIContext ctx, WidgetChild widget) {
+        if (ctx == null || !isVisibleWidget(widget)) {
+            return false;
+        }
+        try {
+            return clickWidgetCenter(ctx, widget)
+                    || widget.click()
+                    || clickWidgetByMouse(ctx, widget);
+        } catch (RuntimeException ex) {
+            return false;
+        }
     }
 
     private boolean clickWidgetActions(APIContext ctx, WidgetChild widget, String... actions) {
@@ -1404,6 +1401,21 @@ public class EnchantJewelleryProfitScript extends Script {
             text.append(' ').append(widget.getRawText());
         }
         return text.toString().replaceAll("<[^>]+>", " ");
+    }
+
+    private String widgetSummary(WidgetChild widget) {
+        if (widget == null) {
+            return "{null}";
+        }
+        try {
+            return "{visible=" + isVisibleWidget(widget)
+                    + ",text='" + cleanWidgetText(visibleText(widget)) + "'"
+                    + ",bounds=" + widget.getBounds()
+                    + ",center=" + widget.getCentralPoint()
+                    + "}";
+        } catch (RuntimeException ex) {
+            return "{error=" + ex.getClass().getSimpleName() + "}";
+        }
     }
 
     private WidgetChild findVisibleWidgetByText(APIContext ctx, String text) {
