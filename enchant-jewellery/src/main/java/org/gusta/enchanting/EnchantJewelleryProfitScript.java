@@ -32,7 +32,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.14-quarantine-sapphire";
+    private static final String SCRIPT_VERSION = "v0.1.15-ready-inventory-first";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -194,6 +194,22 @@ public class EnchantJewelleryProfitScript extends Script {
 
             stats.startExperienceIfNeeded(ctx);
 
+            if (enchantInventoryCycleActive && activeMethod != null) {
+                enchantInventory(ctx, activeMethod);
+                return;
+            }
+
+            EnchantMethod readyMethod = readyEnchantMethod(ctx);
+            if (readyMethod != null) {
+                if (activeMethod == null || !activeMethod.key.equals(readyMethod.key)) {
+                    activeMethod = readyMethod;
+                    activeQuote = pricing.quote(ctx, readyMethod);
+                    nextMethodRefreshAt = System.currentTimeMillis() + METHOD_REFRESH_MS;
+                }
+                enchantInventory(ctx, readyMethod);
+                return;
+            }
+
             if (!ensureAtGrandExchangeBeforeActions(ctx)) {
                 return;
             }
@@ -207,11 +223,6 @@ public class EnchantJewelleryProfitScript extends Script {
                 stats.setStatus("Closing GE before enchanting");
                 ctx.grandExchange().close();
                 Time.sleep(600, 900, () -> !ctx.grandExchange().isOpen(), 100);
-                return;
-            }
-
-            if (enchantInventoryCycleActive && activeMethod != null) {
-                enchantInventory(ctx, activeMethod);
                 return;
             }
 
@@ -549,7 +560,25 @@ public class EnchantJewelleryProfitScript extends Script {
         return inventoryReadyForEnchant(ctx, method) && !ctx.bank().isOpen();
     }
 
+    private EnchantMethod readyEnchantMethod(APIContext ctx) {
+        if (ctx == null || ctx.bank().isOpen()) {
+            return null;
+        }
+        if (activeMethod != null && inventoryReadyForEnchant(ctx, activeMethod)) {
+            return activeMethod;
+        }
+        for (EnchantMethod method : METHODS) {
+            if (inventoryReadyForEnchant(ctx, method)) {
+                return method;
+            }
+        }
+        return null;
+    }
+
     private boolean inventoryReadyForEnchant(APIContext ctx, EnchantMethod method) {
+        if (ctx == null || method == null) {
+            return false;
+        }
         return ctx.inventory().getCount(method.inputItem) > 0
                 && ctx.inventory().getCount(true, COSMIC_RUNE) > 0
                 && ctx.equipment().contains(method.staff);
