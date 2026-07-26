@@ -32,7 +32,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.19-exact-widget-sequence";
+    private static final String SCRIPT_VERSION = "v0.1.20-action-only-spell";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -887,7 +887,7 @@ public class EnchantJewelleryProfitScript extends Script {
 
             stats.setStatus("Opening Jewellery Enchantments via 218." + JEWELLERY_ENCHANTMENTS_CHILD);
             humanWidgetPause();
-            boolean opened = clickExactWidget(ctx, jewelleryEnchantments);
+            boolean opened = interactWidgetActionOnly(jewelleryEnchantments, "View", "Open", "Cast");
             trace(ctx, method, "select-spell:click-218-" + JEWELLERY_ENCHANTMENTS_CHILD
                     + " attempt=" + attempt
                     + " clicked=" + opened
@@ -916,9 +916,9 @@ public class EnchantJewelleryProfitScript extends Script {
             return false;
         }
 
-        stats.setStatus("Clicking " + method.spell.getSpellName() + " via exact 218." + method.spellWidgetChild);
+        stats.setStatus("Selecting " + method.spell.getSpellName() + " via action-only 218." + method.spellWidgetChild);
         humanWidgetPause();
-        boolean clicked = clickExactWidget(ctx, spellWidget);
+        boolean clicked = interactWidgetActionOnly(spellWidget, "Cast", method.spell.getSpellName(), "Lvl-1 Enchant");
         trace(ctx, method, "select-spell:click-218-" + method.spellWidgetChild
                 + " clicked=" + clicked
                 + " widget=" + widgetSummary(spellWidget));
@@ -989,17 +989,24 @@ public class EnchantJewelleryProfitScript extends Script {
         return clicked;
     }
 
-    private boolean clickExactWidget(APIContext ctx, WidgetChild widget) {
-        if (ctx == null || !isVisibleWidget(widget)) {
+    private boolean interactWidgetActionOnly(WidgetChild widget, String... actions) {
+        if (!isVisibleWidget(widget)) {
             return false;
         }
-        try {
-            return clickWidgetCenter(ctx, widget)
-                    || widget.click()
-                    || clickWidgetByMouse(ctx, widget);
-        } catch (RuntimeException ex) {
-            return false;
+
+        for (String action : actions) {
+            if (action == null || action.isBlank()) {
+                continue;
+            }
+            try {
+                if (widget.interact(action)) {
+                    return true;
+                }
+            } catch (RuntimeException ignored) {
+                // Try the next action name.
+            }
         }
+        return false;
     }
 
     private boolean clickWidgetActions(APIContext ctx, WidgetChild widget, String... actions) {
@@ -1410,8 +1417,6 @@ public class EnchantJewelleryProfitScript extends Script {
         try {
             return "{visible=" + isVisibleWidget(widget)
                     + ",text='" + cleanWidgetText(visibleText(widget)) + "'"
-                    + ",bounds=" + widget.getBounds()
-                    + ",center=" + widget.getCentralPoint()
                     + "}";
         } catch (RuntimeException ex) {
             return "{error=" + ex.getClass().getSimpleName() + "}";
