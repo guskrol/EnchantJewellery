@@ -32,7 +32,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.15-ready-inventory-first";
+    private static final String SCRIPT_VERSION = "v0.1.16-direct-spell-widget-click";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -740,11 +740,6 @@ public class EnchantJewelleryProfitScript extends Script {
     }
 
     private boolean openJewelleryEnchantments(APIContext ctx, EnchantMethod method) {
-        WidgetChild expectedEnchant = ctx.widgets().get(SPELLBOOK_GROUP, method.spellWidgetChild);
-        if (isVisibleWidget(expectedEnchant)) {
-            return true;
-        }
-
         for (int attempt = 1; attempt <= 2; attempt++) {
             WidgetChild jewelleryEnchantments = ctx.widgets().get(SPELLBOOK_GROUP, JEWELLERY_ENCHANTMENTS_CHILD);
             if (!isVisibleWidget(jewelleryEnchantments)) {
@@ -754,7 +749,8 @@ public class EnchantJewelleryProfitScript extends Script {
 
             stats.setStatus("Opening Jewellery Enchantments via 218." + JEWELLERY_ENCHANTMENTS_CHILD);
             humanWidgetPause();
-            clickWidgetActions(ctx, jewelleryEnchantments, "Open", "View", "Cast");
+            boolean opened = clickWidgetByMouse(ctx, jewelleryEnchantments)
+                    || clickWidgetActions(ctx, jewelleryEnchantments, "Open", "View", "Cast");
             Time.sleep(
                     HUMAN_WIDGET_MIN_MS,
                     HUMAN_WIDGET_MAX_MS,
@@ -780,18 +776,20 @@ public class EnchantJewelleryProfitScript extends Script {
 
         stats.setStatus("Selecting " + method.spell.getSpellName() + " via 218." + method.spellWidgetChild);
         humanWidgetPause();
-        boolean clicked = clickWidgetActions(ctx, spellWidget, "Cast", method.spell.getSpellName());
+        boolean clicked = clickWidgetByMouse(ctx, spellWidget)
+                || clickWidgetCenter(ctx, spellWidget)
+                || clickWidgetActions(ctx, spellWidget, "Cast", method.spell.getSpellName());
         Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.magic().isSpellSelected(), 100);
 
         if (!ctx.magic().isSpellSelected()) {
             humanWidgetPause();
-            clicked = clickWidgetCenter(ctx, spellWidget) || clicked;
+            clicked = clickWidgetByRandomPoint(ctx, spellWidget) || clicked;
             Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.magic().isSpellSelected(), 100);
         }
 
         if (!ctx.magic().isSpellSelected()) {
             humanWidgetPause();
-            clicked = spellWidget.click() || clicked;
+            clicked = clickWidgetActions(ctx, spellWidget, "Cast", method.spell.getSpellName()) || clicked;
             Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS, () -> ctx.magic().isSpellSelected(), 100);
         }
 
@@ -842,7 +840,10 @@ public class EnchantJewelleryProfitScript extends Script {
             }
         }
 
-        return clickWidgetCenter(ctx, widget) || widget.click();
+        return clickWidgetByMouse(ctx, widget)
+                || clickWidgetCenter(ctx, widget)
+                || clickWidgetByRandomPoint(ctx, widget)
+                || widget.click();
     }
 
     private boolean openMagicTab(APIContext ctx) {
@@ -1260,6 +1261,33 @@ public class EnchantJewelleryProfitScript extends Script {
         }
         Point point = widget.getCentralPoint();
         return point != null && ctx.mouse().click(point, false);
+    }
+
+    private boolean clickWidgetByMouse(APIContext ctx, WidgetChild widget) {
+        if (ctx == null || !isVisibleWidget(widget)) {
+            return false;
+        }
+        try {
+            return ctx.mouse().click(widget, false);
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private boolean clickWidgetByRandomPoint(APIContext ctx, WidgetChild widget) {
+        if (ctx == null || !isVisibleWidget(widget)) {
+            return false;
+        }
+        try {
+            Rectangle bounds = widget.getBounds();
+            if (bounds == null || bounds.width <= 0 || bounds.height <= 0) {
+                return false;
+            }
+            Point point = randomPointInside(bounds, 4);
+            return point != null && ctx.mouse().click(point, false);
+        } catch (RuntimeException ignored) {
+            return false;
+        }
     }
 
     private boolean clickInventoryItemByMouse(APIContext ctx, ItemWidget item) {
