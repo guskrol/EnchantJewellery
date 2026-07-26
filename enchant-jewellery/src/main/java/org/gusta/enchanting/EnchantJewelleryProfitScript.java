@@ -43,7 +43,8 @@ import java.util.regex.Pattern;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.2.2-enchant-before-walking";
+    private static final String SCRIPT_VERSION = "v0.2.3-wiki-api-disabled";
+    private static final boolean ENABLE_WIKI_PRICE_API = false;
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -215,6 +216,8 @@ public class EnchantJewelleryProfitScript extends Script {
         stats = new Stats();
         addTask(new EnchantTask());
         log("Enchant Jewellery Profit " + SCRIPT_VERSION + " started");
+        debugLog("Wiki Prices API enabled=" + ENABLE_WIKI_PRICE_API
+                + "; fallback selector allows stable Sapphire rings only when disabled");
         return true;
     }
 
@@ -406,6 +409,9 @@ public class EnchantJewelleryProfitScript extends Script {
         List<Quote> quotes = new ArrayList<>();
         int level = magicLevel(ctx);
         for (EnchantMethod method : METHODS) {
+            if (!methodEnabled(method)) {
+                continue;
+            }
             if (level < method.requiredMagic) {
                 continue;
             }
@@ -702,6 +708,9 @@ public class EnchantJewelleryProfitScript extends Script {
             return activeMethod;
         }
         for (EnchantMethod method : METHODS) {
+            if (!methodEnabled(method)) {
+                continue;
+            }
             if (inventoryReadyForEnchant(ctx, method)) {
                 return method;
             }
@@ -716,6 +725,10 @@ public class EnchantJewelleryProfitScript extends Script {
         return ctx.inventory().getCount(method.inputItem) > 0
                 && ctx.inventory().getCount(true, COSMIC_RUNE) > 0
                 && ctx.equipment().contains(method.staff);
+    }
+
+    private boolean methodEnabled(EnchantMethod method) {
+        return method != null && (ENABLE_WIKI_PRICE_API || method.allowClientPriceFallback);
     }
 
     private void enchantInventory(APIContext ctx, EnchantMethod method) {
@@ -1690,7 +1703,7 @@ public class EnchantJewelleryProfitScript extends Script {
 
     private class Pricing {
         private Quote quote(APIContext ctx, EnchantMethod method) {
-            WikiQuote wikiQuote = wikiPrices.quote(method);
+            WikiQuote wikiQuote = ENABLE_WIKI_PRICE_API ? wikiPrices.quote(method) : null;
             if (wikiQuote != null) {
                 long cost = (long) wikiQuote.inputBuyPrice + wikiQuote.cosmicBuyPrice;
                 long profit = taxedSellValue(wikiQuote.outputSellPrice) - cost;
@@ -1727,7 +1740,7 @@ public class EnchantJewelleryProfitScript extends Script {
         }
 
         private int quickBuyPrice(APIContext ctx, String itemName, long fallbackPrice) {
-            Integer wikiBuy = wikiPrices.quickBuyPrice(itemName);
+            Integer wikiBuy = ENABLE_WIKI_PRICE_API ? wikiPrices.quickBuyPrice(itemName) : null;
             if (wikiBuy != null && wikiBuy > 0) {
                 return clampToInt(Math.max(1L, Math.round(Math.ceil(wikiBuy * BUY_MARKUP))));
             }
@@ -1738,7 +1751,7 @@ public class EnchantJewelleryProfitScript extends Script {
         }
 
         private int quickSellPrice(APIContext ctx, String itemName, long fallbackPrice) {
-            Integer wikiSell = wikiPrices.quickSellPrice(itemName);
+            Integer wikiSell = ENABLE_WIKI_PRICE_API ? wikiPrices.quickSellPrice(itemName) : null;
             if (wikiSell != null && wikiSell > 0) {
                 return clampToInt(Math.max(1L, Math.round(Math.floor(wikiSell * SELL_MARKDOWN))));
             }
