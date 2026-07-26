@@ -4,14 +4,14 @@ EpicBot OSRS script for the P2P Sapphire ring enchant loop:
 
 - Sapphire ring -> Ring of recoil
 
-Current quarantine build: `v0.1.25-resizable-lvl1-fallback`.
+Current quarantine build: `v0.1.26-panel-relative-spellbook-clicks`.
 
 This build intentionally removes the dynamic OSRS Wiki price selector, extra jewellery methods, watchdog, and file diagnostics while we isolate the client crash. It uses the older sapphire-only core flow:
 
 - checks Sapphire ring profit using EpicBot client pricing;
 - buys missing Sapphire rings and Cosmic runes through the Grand Exchange;
 - prepares inventory from the bank;
-- adds a resizeable-client fallback click for the visible `Lvl-1 Enchant` icon when widget bounds do not select the spell;
+- uses the live side-panel bounds for `218.15` and `218.16`, only translating widget coordinates when they are outside that panel;
 - clicks the Sapphire ring once to process the full inventory;
 - banks/sells Ring of recoil outputs.
 

@@ -32,14 +32,10 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.25-resizable-lvl1-fallback";
+    private static final String SCRIPT_VERSION = "v0.1.26-panel-relative-spellbook-clicks";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int FIXED_CANVAS_WIDTH = 765;
     private static final int FIXED_CANVAS_HEIGHT = 503;
-    private static final int FIXED_INVENTORY_GRID_X = 563;
-    private static final int FIXED_INVENTORY_GRID_Y = 213;
-    private static final int FIXED_INVENTORY_GRID_WIDTH = 174;
-    private static final int FIXED_INVENTORY_GRID_HEIGHT = 252;
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
     private static final int GE_MIN_Y = 3465;
@@ -917,7 +913,7 @@ public class EnchantJewelleryProfitScript extends Script {
 
         if (!ctx.magic().isSpellSelected() && method.spellWidgetChild == LEVEL_1_ENCHANT_CHILD) {
             stats.setStatus("Lvl-1 not selected via widget bounds; using resizeable fallback");
-            clicked = clickResizableLvl1EnchantFallback(ctx, method) || clicked;
+            clicked = clickResizableLvl1EnchantFallback(ctx, method, inventoryPanel) || clicked;
             Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS,
                     () -> ctx.magic().isSpellSelected() || wrongSpellDetected,
                     100);
@@ -990,19 +986,20 @@ public class EnchantJewelleryProfitScript extends Script {
         return clicked;
     }
 
-    private boolean clickResizableLvl1EnchantFallback(APIContext ctx, EnchantMethod method) {
+    private boolean clickResizableLvl1EnchantFallback(APIContext ctx, EnchantMethod method, Rectangle inventoryPanel) {
         int canvasWidth = Math.max(1, ctx.client().getCanvasWidth());
         int canvasHeight = Math.max(1, ctx.client().getCanvasHeight());
-        if (canvasWidth <= FIXED_CANVAS_WIDTH + 100 || canvasHeight <= FIXED_CANVAS_HEIGHT + 100) {
-            trace(ctx, method, "spell:lvl1-fallback-skipped-fixed-canvas canvas="
+        if (inventoryPanel == null) {
+            trace(ctx, method, "spell:lvl1-fallback-skipped-no-panel canvas="
                     + canvasWidth + "x" + canvasHeight);
             return false;
         }
 
         Point[] candidates = {
-                new Point(canvasWidth - 123, canvasHeight - 310),
-                new Point(canvasWidth - 119, canvasHeight - 302),
-                new Point(canvasWidth - 132, canvasHeight - 306)
+                new Point(inventoryPanel.x + 79, inventoryPanel.y + 44),
+                new Point(inventoryPanel.x + 74, inventoryPanel.y + 44),
+                new Point(inventoryPanel.x + 79, inventoryPanel.y + 52),
+                new Point(inventoryPanel.x + 66, inventoryPanel.y + 52)
         };
 
         for (int i = 0; i < candidates.length; i++) {
@@ -1011,15 +1008,17 @@ public class EnchantJewelleryProfitScript extends Script {
                     base.x + ThreadLocalRandom.current().nextInt(-4, 5),
                     base.y + ThreadLocalRandom.current().nextInt(-4, 5)
             );
-            if (!isRightSidePanelPoint(ctx, point)) {
+            if (!isSpellbookPanelPoint(ctx, point, inventoryPanel)) {
                 trace(ctx, method, "spell:lvl1-fallback-refused index=" + i
                         + " point=" + point.x + "," + point.y
+                        + " panel=" + rectangleText(inventoryPanel)
                         + " canvas=" + canvasWidth + "x" + canvasHeight);
                 continue;
             }
 
             trace(ctx, method, "spell:lvl1-fallback-before-click index=" + i
                     + " point=" + point.x + "," + point.y
+                    + " panel=" + rectangleText(inventoryPanel)
                     + " canvas=" + canvasWidth + "x" + canvasHeight);
             if (!ctx.mouse().move(point)) {
                 trace(ctx, method, "spell:lvl1-fallback-move-failed index=" + i);
@@ -1056,7 +1055,7 @@ public class EnchantJewelleryProfitScript extends Script {
             trace(ctx, activeMethod, "primitive-widget:no-point child=" + child + " label=" + label);
             return false;
         }
-        Point point = translateFixedSpellbookPoint(ctx, rawPoint, inventoryPanel);
+        Point point = spellbookClickPoint(ctx, child, rawPoint, inventoryPanel);
         if (!isSpellbookPanelPoint(ctx, point, inventoryPanel)) {
             trace(ctx, activeMethod, "primitive-widget:refused-outside-spellbook-panel child=" + child
                     + " label='" + label + "'"
@@ -1089,20 +1088,50 @@ public class EnchantJewelleryProfitScript extends Script {
         return clicked;
     }
 
-    private Point translateFixedSpellbookPoint(APIContext ctx, Point rawPoint, Rectangle inventoryPanel) {
+    private Point spellbookClickPoint(APIContext ctx, int child, Point rawPoint, Rectangle inventoryPanel) {
+        if (isSpellbookPanelPoint(ctx, rawPoint, inventoryPanel)) {
+            return rawPoint;
+        }
+
+        Point panelPoint = spellbookChildPointFromPanel(child, inventoryPanel);
+        if (panelPoint != null) {
+            return jitterPoint(panelPoint, 4);
+        }
+
+        return translateFixedSpellbookPoint(ctx, rawPoint);
+    }
+
+    private Point spellbookChildPointFromPanel(int child, Rectangle inventoryPanel) {
+        if (inventoryPanel == null) {
+            return null;
+        }
+
+        if (child == JEWELLERY_ENCHANTMENTS_CHILD) {
+            return new Point(inventoryPanel.x + inventoryPanel.width - 6, inventoryPanel.y + 9);
+        }
+        if (child == LEVEL_1_ENCHANT_CHILD) {
+            return new Point(inventoryPanel.x + 79, inventoryPanel.y + 44);
+        }
+        return null;
+    }
+
+    private Point jitterPoint(Point point, int radius) {
+        if (point == null || radius <= 0) {
+            return point;
+        }
+        return new Point(
+                point.x + ThreadLocalRandom.current().nextInt(-radius, radius + 1),
+                point.y + ThreadLocalRandom.current().nextInt(-radius, radius + 1)
+        );
+    }
+
+    private Point translateFixedSpellbookPoint(APIContext ctx, Point rawPoint) {
         int canvasWidth = Math.max(1, ctx.client().getCanvasWidth());
         int canvasHeight = Math.max(1, ctx.client().getCanvasHeight());
         int x = rawPoint.x;
         int y = rawPoint.y;
 
-        if (inventoryPanel != null
-                && rawPoint.x <= FIXED_CANVAS_WIDTH
-                && rawPoint.y <= FIXED_CANVAS_HEIGHT) {
-            double xRatio = (double) (rawPoint.x - FIXED_INVENTORY_GRID_X) / FIXED_INVENTORY_GRID_WIDTH;
-            double yRatio = (double) (rawPoint.y - FIXED_INVENTORY_GRID_Y) / FIXED_INVENTORY_GRID_HEIGHT;
-            x = inventoryPanel.x + (int) Math.round(xRatio * inventoryPanel.width);
-            y = inventoryPanel.y + (int) Math.round(yRatio * inventoryPanel.height);
-        } else if (canvasWidth > FIXED_CANVAS_WIDTH + 100
+        if (canvasWidth > FIXED_CANVAS_WIDTH + 100
                 && canvasHeight > FIXED_CANVAS_HEIGHT + 100
                 && rawPoint.x <= FIXED_CANVAS_WIDTH
                 && rawPoint.y <= FIXED_CANVAS_HEIGHT) {
@@ -1142,18 +1171,6 @@ public class EnchantJewelleryProfitScript extends Script {
         return point.x >= panelLeft
                 && point.x < canvasWidth
                 && point.y >= panelTop
-                && point.y < canvasHeight;
-    }
-
-    private boolean isRightSidePanelPoint(APIContext ctx, Point point) {
-        if (point == null) {
-            return false;
-        }
-        int canvasWidth = Math.max(1, ctx.client().getCanvasWidth());
-        int canvasHeight = Math.max(1, ctx.client().getCanvasHeight());
-        return point.x >= Math.max(0, canvasWidth - 280)
-                && point.x < canvasWidth
-                && point.y >= Math.max(0, canvasHeight - 380)
                 && point.y < canvasHeight;
     }
 
