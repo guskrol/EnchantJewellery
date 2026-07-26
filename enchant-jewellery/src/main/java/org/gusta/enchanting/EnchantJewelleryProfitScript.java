@@ -37,12 +37,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.IntSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.2.0-dynamic-wiki-prices";
+    private static final String SCRIPT_VERSION = "v0.2.1-no-ready-walk-logs";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
@@ -62,6 +63,7 @@ public class EnchantJewelleryProfitScript extends Script {
     private static final int HUMAN_ITEM_MIN_MS = 700;
     private static final int HUMAN_ITEM_MAX_MS = 1_350;
     private static final long ROW_TELEPORT_RETRY_MS = 12_000L;
+    private static final long READY_TO_ENCHANT_GRACE_MS = 45_000L;
     private static final int SPELLBOOK_GROUP = 218;
     private static final int JEWELLERY_ENCHANTMENTS_CHILD = 15;
     private static final int LEVEL_1_ENCHANT_CHILD = 16;
@@ -204,6 +206,7 @@ public class EnchantJewelleryProfitScript extends Script {
     private long nextIdleLogAt;
     private long nextRowTeleportAttemptAt;
     private long lastSpellWidgetClickAt;
+    private long lastReadyToEnchantAt;
     private boolean forceSpellSelectionForNextInventory;
     private boolean stoppedForNoProfit;
 
@@ -904,6 +907,9 @@ public class EnchantJewelleryProfitScript extends Script {
         ItemWidget item = ctx.inventory().getItem(method.inputItem);
         if (item == null) {
             stats.setStatus("Missing material in inventory: " + method.inputItem);
+            debugLog("Material missing before cast. method=" + method.label
+                    + " location=" + locationText(ctx)
+                    + " inventory=" + inventoryState(ctx, method));
             return false;
         }
 
@@ -912,9 +918,17 @@ public class EnchantJewelleryProfitScript extends Script {
         boolean directClickExpected = ctx.magic().isSpellSelected()
                 || System.currentTimeMillis() - lastSpellWidgetClickAt < 8_000L;
         boolean clicked = false;
+        debugLog("Material click attempt. method=" + method.label
+                + " item=" + itemDebug(item)
+                + " directExpected=" + directClickExpected
+                + " spellSelected=" + ctx.magic().isSpellSelected()
+                + " inventoryTab=" + ctx.tabs().isOpen(ITabsAPI.Tabs.INVENTORY)
+                + " location=" + locationText(ctx));
 
         if (directClickExpected) {
-            clicked = clickInventoryItemByMouse(ctx, item) || item.click(false);
+            clicked = ctx.inventory().interactItem("Cast", method.inputItem)
+                    || item.interact("Cast")
+                    || item.click(false);
         }
 
         if (!clicked) {
@@ -924,6 +938,13 @@ public class EnchantJewelleryProfitScript extends Script {
         }
 
         Time.sleep(HUMAN_ITEM_MIN_MS, HUMAN_ITEM_MAX_MS);
+        debugLog("Material click result. method=" + method.label
+                + " clicked=" + clicked
+                + " input=" + ctx.inventory().getCount(method.inputItem)
+                + " output=" + ctx.inventory().getCount(method.outputItem)
+                + " moving=" + ctx.localPlayer().isMoving()
+                + " animating=" + ctx.localPlayer().isAnimating()
+                + " location=" + locationText(ctx));
         return clicked;
     }
 
@@ -1021,6 +1042,26 @@ public class EnchantJewelleryProfitScript extends Script {
             nextRowTeleportAttemptAt = 0L;
             return true;
         }
+
+        if (activeMethod != null
+                && recentlyPreparedEnchantInventory()
+                && inventoryReadyForEnchant(ctx, activeMethod)
+                && !ctx.bank().isOpen()
+                && !ctx.grandExchange().isOpen()) {
+            debugLog("GE gate suppressed after bank prep; inventory is ready for "
+                    + activeMethod.label
+                    + " location=" + locationText(ctx)
+                    + " input=" + ctx.inventory().getCount(activeMethod.inputItem)
+                    + " cosmics=" + ctx.inventory().getCount(true, COSMIC_RUNE));
+            return true;
+        }
+
+        debugLog("GE gate: player is outside GE before action. location=" + locationText(ctx)
+                + " bankOpen=" + ctx.bank().isOpen()
+                + " geOpen=" + ctx.grandExchange().isOpen()
+                + " moving=" + ctx.localPlayer().isMoving()
+                + " animating=" + ctx.localPlayer().isAnimating()
+                + " readyGrace=" + recentlyPreparedEnchantInventory());
 
         resetEnchantCycle();
 
@@ -1269,6 +1310,11 @@ public class EnchantJewelleryProfitScript extends Script {
         if (status != null && status.startsWith("Ready to enchant")) {
             forceSpellSelectionForNextInventory = true;
             lastSpellWidgetClickAt = 0L;
+            lastReadyToEnchantAt = System.currentTimeMillis();
+            debugLog("Bank closed with enchant inventory ready. method="
+                    + (activeMethod == null ? "-" : activeMethod.label)
+                    + " location=" + locationText(ctx)
+                    + " inventory=" + inventoryState(ctx, activeMethod));
         }
         ctx.bank().close();
         Time.sleep(500, 900, () -> !ctx.bank().isOpen(), 100);
@@ -1358,40 +1404,6 @@ public class EnchantJewelleryProfitScript extends Script {
         return point != null && ctx.mouse().click(point, false);
     }
 
-    private boolean clickInventoryItemByMouse(APIContext ctx, ItemWidget item) {
-        if (item == null) {
-            return false;
-        }
-        Rectangle bounds = item.getBounds();
-        if (bounds == null || bounds.width <= 0 || bounds.height <= 0) {
-            return false;
-        }
-        Point point = randomPointInside(bounds, 5);
-        return ctx.mouse().click(point, false);
-    }
-
-    private Point randomPointInside(Rectangle bounds, int margin) {
-        int marginX = Math.min(Math.max(0, margin), Math.max(0, bounds.width / 3));
-        int marginY = Math.min(Math.max(0, margin), Math.max(0, bounds.height / 3));
-        int left = bounds.x + marginX;
-        int right = bounds.x + bounds.width - marginX - 1;
-        int top = bounds.y + marginY;
-        int bottom = bounds.y + bounds.height - marginY - 1;
-
-        if (right < left) {
-            left = bounds.x + bounds.width / 2;
-            right = left;
-        }
-        if (bottom < top) {
-            top = bounds.y + bounds.height / 2;
-            bottom = top;
-        }
-
-        int x = left == right ? left : ThreadLocalRandom.current().nextInt(left, right + 1);
-        int y = top == bottom ? top : ThreadLocalRandom.current().nextInt(top, bottom + 1);
-        return new Point(x, y);
-    }
-
     private boolean isVisibleWidget(WidgetChild widget) {
         return widget != null
                 && widget.isValid()
@@ -1460,6 +1472,10 @@ public class EnchantJewelleryProfitScript extends Script {
         getLogger().info(message);
     }
 
+    private void debugLog(String message) {
+        getLogger().info("[Flow] " + message);
+    }
+
     private void logOccasionally(String message) {
         long now = System.currentTimeMillis();
         if (now < nextIdleLogAt) {
@@ -1477,6 +1493,60 @@ public class EnchantJewelleryProfitScript extends Script {
             return value;
         }
         return value.substring(0, Math.max(1, maxChars - 3)) + "...";
+    }
+
+    private boolean recentlyPreparedEnchantInventory() {
+        return lastReadyToEnchantAt > 0L
+                && System.currentTimeMillis() - lastReadyToEnchantAt <= READY_TO_ENCHANT_GRACE_MS;
+    }
+
+    private String locationText(APIContext ctx) {
+        try {
+            Tile tile = ctx.localPlayer().getLocation();
+            if (tile == null) {
+                return "unknown";
+            }
+            return tile.getX() + "," + tile.getY() + "," + tile.getPlane();
+        } catch (RuntimeException ignored) {
+            return "unknown";
+        }
+    }
+
+    private String inventoryState(APIContext ctx, EnchantMethod method) {
+        if (ctx == null || method == null) {
+            return "-";
+        }
+        return method.inputItem + "=" + safeCount(() -> ctx.inventory().getCount(method.inputItem))
+                + "," + method.outputItem + "=" + safeCount(() -> ctx.inventory().getCount(method.outputItem))
+                + "," + COSMIC_RUNE + "=" + safeCount(() -> ctx.inventory().getCount(true, COSMIC_RUNE));
+    }
+
+    private String itemDebug(ItemWidget item) {
+        if (item == null) {
+            return "null";
+        }
+        Rectangle bounds;
+        try {
+            bounds = item.getBounds();
+        } catch (RuntimeException ignored) {
+            bounds = null;
+        }
+        return "{name='" + item.getName()
+                + "',idx=" + safeCount(item::getIndex)
+                + ",x=" + safeCount(item::getX)
+                + ",y=" + safeCount(item::getY)
+                + ",w=" + safeCount(item::getWidth)
+                + ",h=" + safeCount(item::getHeight)
+                + ",bounds=" + bounds
+                + "}";
+    }
+
+    private int safeCount(IntSupplier supplier) {
+        try {
+            return supplier.getAsInt();
+        } catch (RuntimeException ignored) {
+            return 0;
+        }
     }
 
     private int clampToInt(long value) {
