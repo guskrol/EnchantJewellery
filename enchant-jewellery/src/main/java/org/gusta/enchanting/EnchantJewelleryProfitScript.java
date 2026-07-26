@@ -32,8 +32,10 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.22-primitive-magic-click";
+    private static final String SCRIPT_VERSION = "v0.1.23-resizable-spellbook-coords";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
+    private static final int FIXED_CANVAS_WIDTH = 765;
+    private static final int FIXED_CANVAS_HEIGHT = 503;
     private static final int GE_MIN_X = 3150;
     private static final int GE_MAX_X = 3190;
     private static final int GE_MIN_Y = 3465;
@@ -988,16 +990,27 @@ public class EnchantJewelleryProfitScript extends Script {
             return false;
         }
 
-        Point point = randomPointInside(bounds, 6);
-        if (point == null) {
+        Point rawPoint = randomPointInside(bounds, 6);
+        if (rawPoint == null) {
             trace(ctx, activeMethod, "primitive-widget:no-point child=" + child + " label=" + label);
+            return false;
+        }
+        Point point = translateFixedSpellbookPoint(ctx, rawPoint);
+        if (!isSpellbookPanelPoint(ctx, point)) {
+            trace(ctx, activeMethod, "primitive-widget:refused-outside-spellbook-panel child=" + child
+                    + " label='" + label + "'"
+                    + " raw=" + rawPoint.x + "," + rawPoint.y
+                    + " translated=" + point.x + "," + point.y
+                    + " canvas=" + ctx.client().getCanvasWidth() + "x" + ctx.client().getCanvasHeight());
             return false;
         }
 
         trace(ctx, activeMethod, "primitive-widget:before-move child=" + child
                 + " label='" + label + "'"
-                + " point=" + point.x + "," + point.y
-                + " bounds=" + bounds.x + "," + bounds.y + "," + bounds.width + "," + bounds.height);
+                + " rawPoint=" + rawPoint.x + "," + rawPoint.y
+                + " translatedPoint=" + point.x + "," + point.y
+                + " bounds=" + bounds.x + "," + bounds.y + "," + bounds.width + "," + bounds.height
+                + " canvas=" + ctx.client().getCanvasWidth() + "x" + ctx.client().getCanvasHeight());
         if (!ctx.mouse().move(point)) {
             trace(ctx, activeMethod, "primitive-widget:move-failed child=" + child + " label=" + label);
             return false;
@@ -1011,6 +1024,47 @@ public class EnchantJewelleryProfitScript extends Script {
                 + " clicked=" + clicked
                 + " mouse=" + ctx.mouse().getX() + "," + ctx.mouse().getY());
         return clicked;
+    }
+
+    private Point translateFixedSpellbookPoint(APIContext ctx, Point rawPoint) {
+        int canvasWidth = Math.max(1, ctx.client().getCanvasWidth());
+        int canvasHeight = Math.max(1, ctx.client().getCanvasHeight());
+        int x = rawPoint.x;
+        int y = rawPoint.y;
+
+        if (canvasWidth > FIXED_CANVAS_WIDTH + 100
+                && canvasHeight > FIXED_CANVAS_HEIGHT + 100
+                && rawPoint.x <= FIXED_CANVAS_WIDTH
+                && rawPoint.y <= FIXED_CANVAS_HEIGHT) {
+            x += canvasWidth - FIXED_CANVAS_WIDTH;
+            y += canvasHeight - FIXED_CANVAS_HEIGHT;
+        }
+
+        x = Math.max(0, Math.min(canvasWidth - 1, x));
+        y = Math.max(0, Math.min(canvasHeight - 1, y));
+        return new Point(x, y);
+    }
+
+    private boolean isSpellbookPanelPoint(APIContext ctx, Point point) {
+        if (point == null) {
+            return false;
+        }
+        int canvasWidth = Math.max(1, ctx.client().getCanvasWidth());
+        int canvasHeight = Math.max(1, ctx.client().getCanvasHeight());
+
+        if (canvasWidth <= FIXED_CANVAS_WIDTH + 100 || canvasHeight <= FIXED_CANVAS_HEIGHT + 100) {
+            return point.x >= 520
+                    && point.x < canvasWidth
+                    && point.y >= 160
+                    && point.y < canvasHeight;
+        }
+
+        int panelLeft = Math.max(0, canvasWidth - 280);
+        int panelTop = Math.max(0, canvasHeight - 380);
+        return point.x >= panelLeft
+                && point.x < canvasWidth
+                && point.y >= panelTop
+                && point.y < canvasHeight;
     }
 
     private boolean clickWidgetActions(APIContext ctx, WidgetChild widget, String... actions) {
