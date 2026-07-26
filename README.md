@@ -4,7 +4,7 @@ EpicBot OSRS script for the P2P Sapphire ring enchant loop:
 
 - Sapphire ring -> Ring of recoil
 
-Current quarantine build: `v0.1.17-stateful-safe-cast`.
+Current quarantine build: `v0.1.18-trace-recovery`.
 
 This build intentionally removes the dynamic OSRS Wiki price selector, extra jewellery methods, watchdog, and file diagnostics while we isolate the client crash. It uses the older sapphire-only core flow:
 
@@ -14,6 +14,8 @@ This build intentionally removes the dynamic OSRS Wiki price selector, extra jew
 - selects `Lvl-1 Enchant`;
 - clicks the Sapphire ring once to process the full inventory;
 - banks/sells Ring of recoil outputs.
+
+Runtime decisions are logged to the EpicBot client log with the `[Trace]` prefix.
 
 ## Build
 
