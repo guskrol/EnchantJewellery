@@ -26,9 +26,15 @@ import java.awt.Rectangle;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -37,13 +43,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.BooleanSupplier;
 import java.util.function.IntSupplier;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.2.3-wiki-api-disabled";
+    private static final String SCRIPT_VERSION = "v0.2.4-safe-enchant-click";
     private static final boolean ENABLE_WIKI_PRICE_API = false;
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int GE_MIN_X = 3150;
@@ -206,6 +214,7 @@ public class EnchantJewelleryProfitScript extends Script {
     private long nextGeCollectAt;
     private long nextIdleLogAt;
     private long nextRowTeleportAttemptAt;
+    private long nextPaintErrorLogAt;
     private long lastSpellWidgetClickAt;
     private long lastReadyToEnchantAt;
     private boolean forceSpellSelectionForNextInventory;
@@ -242,6 +251,18 @@ public class EnchantJewelleryProfitScript extends Script {
         if (paint == null || stats == null) {
             return;
         }
+        try {
+            paintOverlay(paint, ctx);
+        } catch (Throwable throwable) {
+            long now = System.currentTimeMillis();
+            if (now >= nextPaintErrorLogAt) {
+                getLogger().warn("Enchant Jewellery paint recovered from error", throwable);
+                nextPaintErrorLogAt = now + 10_000L;
+            }
+        }
+    }
+
+    private void paintOverlay(PaintContext paint, APIContext ctx) {
         stats.startExperienceIfNeeded(ctx);
 
         int x = 8;
@@ -297,6 +318,14 @@ public class EnchantJewelleryProfitScript extends Script {
 
         @Override
         public void run() {
+            try {
+                runSafely();
+            } catch (Throwable throwable) {
+                handleTaskThrowable(throwable);
+            }
+        }
+
+        private void runSafely() {
             APIContext ctx = getAPIContext();
             if (ctx == null) {
                 Time.sleep(600, 900);
@@ -354,6 +383,69 @@ public class EnchantJewelleryProfitScript extends Script {
 
             prepareInventoryOrRestock(ctx, activeMethod);
         }
+    }
+
+    private void handleTaskThrowable(Throwable throwable) {
+        String summary = throwable.getClass().getSimpleName() + ": " + String.valueOf(throwable.getMessage());
+        if (stats != null) {
+            stats.setStatus("Recovered script error: " + summary);
+        }
+        resetEnchantCycle();
+        forceSpellSelectionForNextInventory = true;
+        lastSpellWidgetClickAt = 0L;
+        getLogger().error("Enchant Jewellery task recovered from error", throwable);
+
+        Path dump = writeCrashDiagnostic("task", throwable);
+        if (dump != null) {
+            getLogger().warn("Enchant Jewellery diagnostic saved at " + dump);
+        }
+        Time.sleep(1400, 2400);
+    }
+
+    private Path writeCrashDiagnostic(String source, Throwable throwable) {
+        try {
+            APIContext ctx = getAPIContext();
+            Path directory = Path.of(System.getProperty("user.dir"), "enchant-jewellery-crashes");
+            Files.createDirectories(directory);
+            String stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+            Path file = directory.resolve("enchant-jewellery-crash-" + stamp + ".txt");
+
+            List<String> lines = new ArrayList<>();
+            lines.add("Enchant Jewellery crash diagnostic");
+            lines.add("version=" + SCRIPT_VERSION);
+            lines.add("source=" + source);
+            lines.add("time=" + LocalDateTime.now());
+            lines.add("status=" + (stats == null ? "-" : stats.status));
+            lines.add("activeMethod=" + (activeMethod == null ? "-" : activeMethod.label));
+            lines.add("activeQuote=" + (activeQuote == null ? "-" : activeQuote.profitPerCast + " gp/" + activeQuote.priceSource));
+            lines.add("location=" + (ctx == null ? "ctx-null" : locationText(ctx)));
+            lines.add("inventory=" + (ctx == null ? "ctx-null" : inventoryState(ctx, activeMethod)));
+            lines.add("bankOpen=" + safeBoolean(false, () -> ctx != null && ctx.bank().isOpen()));
+            lines.add("geOpen=" + safeBoolean(false, () -> ctx != null && ctx.grandExchange().isOpen()));
+            lines.add("magicTab=" + safeBoolean(false, () -> ctx != null && ctx.tabs().isOpen(ITabsAPI.Tabs.MAGIC)));
+            lines.add("inventoryTab=" + safeBoolean(false, () -> ctx != null && ctx.tabs().isOpen(ITabsAPI.Tabs.INVENTORY)));
+            lines.add("spellSelected=" + safeBoolean(false, () -> ctx != null && ctx.magic().isSpellSelected()));
+            lines.add("moving=" + safeBoolean(false, () -> ctx != null && ctx.localPlayer().isMoving()));
+            lines.add("animating=" + safeBoolean(false, () -> ctx != null && ctx.localPlayer().isAnimating()));
+            lines.add("cycleActive=" + enchantInventoryCycleActive);
+            lines.add("forceSpellSelection=" + forceSpellSelectionForNextInventory);
+            lines.add("lastReadyToEnchantAt=" + lastReadyToEnchantAt);
+            lines.add("");
+            lines.add("stacktrace:");
+            lines.add(stackTrace(throwable));
+
+            Files.write(file, lines, StandardCharsets.UTF_8);
+            return file;
+        } catch (Throwable writeError) {
+            getLogger().error("Failed to write Enchant Jewellery crash diagnostic", writeError);
+            return null;
+        }
+    }
+
+    private String stackTrace(Throwable throwable) {
+        StringWriter writer = new StringWriter();
+        throwable.printStackTrace(new PrintWriter(writer));
+        return writer.toString();
     }
 
     private boolean selectMethod(APIContext ctx) {
@@ -737,6 +829,15 @@ public class EnchantJewelleryProfitScript extends Script {
             return;
         }
 
+        debugLog("Enchant inventory enter. method=" + method.label
+                + " location=" + locationText(ctx)
+                + " inventory=" + inventoryState(ctx, method)
+                + " bankOpen=" + safeBoolean(false, () -> ctx.bank().isOpen())
+                + " geOpen=" + safeBoolean(false, () -> ctx.grandExchange().isOpen())
+                + " magicTab=" + safeBoolean(false, () -> ctx.tabs().isOpen(ITabsAPI.Tabs.MAGIC))
+                + " inventoryTab=" + safeBoolean(false, () -> ctx.tabs().isOpen(ITabsAPI.Tabs.INVENTORY))
+                + " spellSelected=" + safeBoolean(false, () -> ctx.magic().isSpellSelected()));
+
         if (handleActiveEnchantCycle(ctx, method)) {
             return;
         }
@@ -969,34 +1070,31 @@ public class EnchantJewelleryProfitScript extends Script {
 
         stats.setStatus("Clicking material after spell: " + method.inputItem);
         humanItemPause();
-        boolean directClickExpected = ctx.magic().isSpellSelected()
+        boolean directClickExpected = safeBoolean(false, () -> ctx.magic().isSpellSelected())
                 || System.currentTimeMillis() - lastSpellWidgetClickAt < 8_000L;
         boolean clicked = false;
         debugLog("Material click attempt. method=" + method.label
                 + " item=" + itemDebug(item)
                 + " directExpected=" + directClickExpected
-                + " spellSelected=" + ctx.magic().isSpellSelected()
-                + " inventoryTab=" + ctx.tabs().isOpen(ITabsAPI.Tabs.INVENTORY)
+                + " spellSelected=" + safeBoolean(false, () -> ctx.magic().isSpellSelected())
+                + " inventoryTab=" + safeBoolean(false, () -> ctx.tabs().isOpen(ITabsAPI.Tabs.INVENTORY))
                 + " location=" + locationText(ctx));
 
         if (directClickExpected) {
-            clicked = ctx.inventory().interactItem("Cast", method.inputItem)
-                    || item.interact("Cast");
+            clicked = clickInventoryItemByMouse(ctx, item) || safeItemClick(item);
         }
 
         if (!clicked) {
-            clicked = ctx.menu().interact("Cast", method.inputItem, item, false)
-                    || ctx.menu().interact("Cast", item, false)
-                    || item.interact("Cast");
+            clicked = safeItemClick(item);
         }
 
         Time.sleep(HUMAN_ITEM_MIN_MS, HUMAN_ITEM_MAX_MS);
         debugLog("Material click result. method=" + method.label
                 + " clicked=" + clicked
-                + " input=" + ctx.inventory().getCount(method.inputItem)
-                + " output=" + ctx.inventory().getCount(method.outputItem)
-                + " moving=" + ctx.localPlayer().isMoving()
-                + " animating=" + ctx.localPlayer().isAnimating()
+                + " input=" + safeCount(() -> ctx.inventory().getCount(method.inputItem))
+                + " output=" + safeCount(() -> ctx.inventory().getCount(method.outputItem))
+                + " moving=" + safeBoolean(false, () -> ctx.localPlayer().isMoving())
+                + " animating=" + safeBoolean(false, () -> ctx.localPlayer().isAnimating())
                 + " location=" + locationText(ctx));
         return clicked;
     }
@@ -1469,29 +1567,90 @@ public class EnchantJewelleryProfitScript extends Script {
         return point != null && ctx.mouse().click(point, false);
     }
 
+    private boolean clickInventoryItemByMouse(APIContext ctx, ItemWidget item) {
+        if (ctx == null || item == null) {
+            return false;
+        }
+        try {
+            Rectangle bounds = item.getBounds();
+            if (bounds == null || bounds.width <= 0 || bounds.height <= 0) {
+                return false;
+            }
+            Point point = randomPointInside(bounds, 5);
+            return point != null && ctx.mouse().click(point, false);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private boolean safeItemClick(ItemWidget item) {
+        if (item == null) {
+            return false;
+        }
+        try {
+            return item.click(false);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private Point randomPointInside(Rectangle bounds, int margin) {
+        if (bounds == null || bounds.width <= 0 || bounds.height <= 0) {
+            return null;
+        }
+        int marginX = Math.min(Math.max(0, margin), Math.max(0, bounds.width / 3));
+        int marginY = Math.min(Math.max(0, margin), Math.max(0, bounds.height / 3));
+        int left = bounds.x + marginX;
+        int right = bounds.x + bounds.width - marginX - 1;
+        int top = bounds.y + marginY;
+        int bottom = bounds.y + bounds.height - marginY - 1;
+        if (right < left || bottom < top) {
+            return new Point(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+        }
+        return new Point(
+                ThreadLocalRandom.current().nextInt(left, right + 1),
+                ThreadLocalRandom.current().nextInt(top, bottom + 1)
+        );
+    }
+
     private boolean isVisibleWidget(WidgetChild widget) {
-        return widget != null
-                && widget.isValid()
-                && widget.getWidth() > 0
-                && widget.getHeight() > 0;
+        try {
+            return widget != null
+                    && widget.isValid()
+                    && widget.getWidth() > 0
+                    && widget.getHeight() > 0;
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private boolean isAtGrandExchange(APIContext ctx) {
-        Tile tile = ctx.localPlayer().getLocation();
-        if (tile == null || tile.getPlane() != 0) {
+        if (ctx == null) {
             return false;
         }
-        return tile.getX() >= GE_MIN_X
-                && tile.getX() <= GE_MAX_X
-                && tile.getY() >= GE_MIN_Y
-                && tile.getY() <= GE_MAX_Y;
+        try {
+            Tile tile = ctx.localPlayer().getLocation();
+            if (tile == null || tile.getPlane() != 0) {
+                return false;
+            }
+            return tile.getX() >= GE_MIN_X
+                    && tile.getX() <= GE_MAX_X
+                    && tile.getY() >= GE_MIN_Y
+                    && tile.getY() <= GE_MAX_Y;
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private int magicLevel(APIContext ctx) {
         if (ctx == null) {
             return 0;
         }
-        return ctx.skills().get(Skill.Skills.MAGIC).getRealLevel();
+        try {
+            return ctx.skills().get(Skill.Skills.MAGIC).getRealLevel();
+        } catch (Throwable ignored) {
+            return 0;
+        }
     }
 
     private String marginSummary(APIContext ctx) {
@@ -1572,7 +1731,7 @@ public class EnchantJewelleryProfitScript extends Script {
                 return "unknown";
             }
             return tile.getX() + "," + tile.getY() + "," + tile.getPlane();
-        } catch (RuntimeException ignored) {
+        } catch (Throwable ignored) {
             return "unknown";
         }
     }
@@ -1593,10 +1752,10 @@ public class EnchantJewelleryProfitScript extends Script {
         Rectangle bounds;
         try {
             bounds = item.getBounds();
-        } catch (RuntimeException ignored) {
+        } catch (Throwable ignored) {
             bounds = null;
         }
-        return "{name='" + item.getName()
+        return "{name='" + safeString("-", item::getName)
                 + "',idx=" + safeCount(item::getIndex)
                 + ",x=" + safeCount(item::getX)
                 + ",y=" + safeCount(item::getY)
@@ -1613,7 +1772,7 @@ public class EnchantJewelleryProfitScript extends Script {
         Rectangle bounds;
         try {
             bounds = widget.getBounds();
-        } catch (RuntimeException ignored) {
+        } catch (Throwable ignored) {
             bounds = null;
         }
         return "{parent=" + safeCount(widget::getParentId)
@@ -1628,8 +1787,25 @@ public class EnchantJewelleryProfitScript extends Script {
     private int safeCount(IntSupplier supplier) {
         try {
             return supplier.getAsInt();
-        } catch (RuntimeException ignored) {
+        } catch (Throwable ignored) {
             return 0;
+        }
+    }
+
+    private boolean safeBoolean(boolean fallback, BooleanSupplier supplier) {
+        try {
+            return supplier.getAsBoolean();
+        } catch (Throwable ignored) {
+            return fallback;
+        }
+    }
+
+    private String safeString(String fallback, Supplier<String> supplier) {
+        try {
+            String value = supplier.get();
+            return value == null ? fallback : value;
+        } catch (Throwable ignored) {
+            return fallback;
         }
     }
 
@@ -2174,14 +2350,22 @@ public class EnchantJewelleryProfitScript extends Script {
             if (ctx == null || startingMagicXp >= 0) {
                 return;
             }
-            startingMagicXp = ctx.skills().get(Skill.Skills.MAGIC).getExperience();
+            try {
+                startingMagicXp = ctx.skills().get(Skill.Skills.MAGIC).getExperience();
+            } catch (Throwable ignored) {
+                startingMagicXp = -1;
+            }
         }
 
         private int xpGained(APIContext ctx) {
             if (ctx == null || startingMagicXp < 0) {
                 return 0;
             }
-            return Math.max(0, ctx.skills().get(Skill.Skills.MAGIC).getExperience() - startingMagicXp);
+            try {
+                return Math.max(0, ctx.skills().get(Skill.Skills.MAGIC).getExperience() - startingMagicXp);
+            } catch (Throwable ignored) {
+                return 0;
+            }
         }
 
         private int xpPerHour(APIContext ctx) {

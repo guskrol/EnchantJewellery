@@ -17,7 +17,7 @@ The script prepares inventory/bank supplies, buys missing Sapphire rings and Cos
 
 ## Dynamic Pricing
 
-In `v0.2.3-wiki-api-disabled`, live Wiki API calls are disabled by default to isolate EpicBot client stability issues. With `ENABLE_WIKI_PRICE_API = false`, only methods with a client-price fallback are considered, currently Sapphire rings.
+In `v0.2.4-safe-enchant-click`, live Wiki API calls are disabled by default to isolate EpicBot client stability issues. With `ENABLE_WIKI_PRICE_API = false`, only methods with a client-price fallback are considered, currently Sapphire rings.
 
 When re-enabled, the selector uses the OSRS Wiki Prices API endpoints:
 
@@ -26,6 +26,14 @@ When re-enabled, the selector uses the OSRS Wiki Prices API endpoints:
 - `https://prices.runescape.wiki/api/v1/osrs/1h`
 
 It calculates conservative profit using quick-buy input/cosmic prices, quick-sell output prices, and GE tax. Methods are filtered by minimum profit and 1h liquidity. If the Wiki API is unavailable, only the stable Sapphire ring method can fall back to EpicBot client pricing.
+
+## Diagnostics
+
+If the script catches a runtime error, it writes a diagnostic file under the EpicBot working directory:
+
+```text
+enchant-jewellery-crashes/enchant-jewellery-crash-YYYYMMDD-HHMMSS.txt
+```
 
 ## Build
 
