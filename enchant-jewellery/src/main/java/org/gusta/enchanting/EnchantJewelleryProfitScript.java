@@ -32,7 +32,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.24-force-21815-confirm-spell";
+    private static final String SCRIPT_VERSION = "v0.1.25-resizable-lvl1-fallback";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int FIXED_CANVAS_WIDTH = 765;
     private static final int FIXED_CANVAS_HEIGHT = 503;
@@ -915,6 +915,14 @@ public class EnchantJewelleryProfitScript extends Script {
                 () -> ctx.magic().isSpellSelected() || wrongSpellDetected,
                 100);
 
+        if (!ctx.magic().isSpellSelected() && method.spellWidgetChild == LEVEL_1_ENCHANT_CHILD) {
+            stats.setStatus("Lvl-1 not selected via widget bounds; using resizeable fallback");
+            clicked = clickResizableLvl1EnchantFallback(ctx, method) || clicked;
+            Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS,
+                    () -> ctx.magic().isSpellSelected() || wrongSpellDetected,
+                    100);
+        }
+
         if (wrongSpellDetected) {
             forceSpellSelectionForNextInventory = true;
             lastSpellWidgetClickAt = 0L;
@@ -980,6 +988,55 @@ public class EnchantJewelleryProfitScript extends Script {
                 + " outputNow=" + ctx.inventory().getCount(true, method.outputItem)
                 + " animating=" + ctx.localPlayer().isAnimating());
         return clicked;
+    }
+
+    private boolean clickResizableLvl1EnchantFallback(APIContext ctx, EnchantMethod method) {
+        int canvasWidth = Math.max(1, ctx.client().getCanvasWidth());
+        int canvasHeight = Math.max(1, ctx.client().getCanvasHeight());
+        if (canvasWidth <= FIXED_CANVAS_WIDTH + 100 || canvasHeight <= FIXED_CANVAS_HEIGHT + 100) {
+            trace(ctx, method, "spell:lvl1-fallback-skipped-fixed-canvas canvas="
+                    + canvasWidth + "x" + canvasHeight);
+            return false;
+        }
+
+        Point[] candidates = {
+                new Point(canvasWidth - 123, canvasHeight - 310),
+                new Point(canvasWidth - 119, canvasHeight - 302),
+                new Point(canvasWidth - 132, canvasHeight - 306)
+        };
+
+        for (int i = 0; i < candidates.length; i++) {
+            Point base = candidates[i];
+            Point point = new Point(
+                    base.x + ThreadLocalRandom.current().nextInt(-4, 5),
+                    base.y + ThreadLocalRandom.current().nextInt(-4, 5)
+            );
+            if (!isRightSidePanelPoint(ctx, point)) {
+                trace(ctx, method, "spell:lvl1-fallback-refused index=" + i
+                        + " point=" + point.x + "," + point.y
+                        + " canvas=" + canvasWidth + "x" + canvasHeight);
+                continue;
+            }
+
+            trace(ctx, method, "spell:lvl1-fallback-before-click index=" + i
+                    + " point=" + point.x + "," + point.y
+                    + " canvas=" + canvasWidth + "x" + canvasHeight);
+            if (!ctx.mouse().move(point)) {
+                trace(ctx, method, "spell:lvl1-fallback-move-failed index=" + i);
+                continue;
+            }
+            Time.sleep(450, 850);
+            boolean clicked = ctx.mouse().click(false);
+            trace(ctx, method, "spell:lvl1-fallback-after-click index=" + i
+                    + " clicked=" + clicked
+                    + " spellSelected=" + ctx.magic().isSpellSelected());
+            Time.sleep(700, 1100, () -> ctx.magic().isSpellSelected() || wrongSpellDetected, 100);
+            if (clicked && (ctx.magic().isSpellSelected() || wrongSpellDetected)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private boolean clickSpellbookWidgetPrimitive(APIContext ctx, int child, String label, Rectangle inventoryPanel) {
@@ -1085,6 +1142,18 @@ public class EnchantJewelleryProfitScript extends Script {
         return point.x >= panelLeft
                 && point.x < canvasWidth
                 && point.y >= panelTop
+                && point.y < canvasHeight;
+    }
+
+    private boolean isRightSidePanelPoint(APIContext ctx, Point point) {
+        if (point == null) {
+            return false;
+        }
+        int canvasWidth = Math.max(1, ctx.client().getCanvasWidth());
+        int canvasHeight = Math.max(1, ctx.client().getCanvasHeight());
+        return point.x >= Math.max(0, canvasWidth - 280)
+                && point.x < canvasWidth
+                && point.y >= Math.max(0, canvasHeight - 380)
                 && point.y < canvasHeight;
     }
 
