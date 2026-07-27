@@ -13,7 +13,7 @@ Current enabled methods:
 
 Stable tag: `stable-v0.1.26-panel-relative-spellbook-clicks`.
 
-Current build: `v0.1.30-rotation-instant-output-sell`.
+Current build: `v0.1.31-trust-visible-spell-click`.
 
 This build keeps the stable casting flow isolated while adding conservative Lvl-1/Lvl-2 method selection:
 
@@ -36,6 +36,8 @@ This build keeps the stable casting flow isolated while adding conservative Lvl-
 `v0.1.29` enables selected Lvl-1 and Lvl-2 market-friendly methods and refreshes method selection every 20-30 minutes.
 
 `v0.1.30` forces a full output sale when each rotation ends, using aggressive Grand Exchange sell pricing before the next method is prepared.
+
+`v0.1.31` improves spell selection on resizeable clients by trusting visible spell-widget click points when the Magic API does not immediately report a selected spell.
 
 Runtime decisions are logged to the EpicBot client log with the `[Trace]` prefix.
 

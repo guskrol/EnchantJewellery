@@ -32,7 +32,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.30-rotation-instant-output-sell";
+    private static final String SCRIPT_VERSION = "v0.1.31-trust-visible-spell-click";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int FIXED_CANVAS_WIDTH = 765;
     private static final int FIXED_CANVAS_HEIGHT = 503;
@@ -1082,6 +1082,15 @@ public class EnchantJewelleryProfitScript extends Script {
             return true;
         }
 
+        if (clicked) {
+            lastSpellWidgetClickAt = System.currentTimeMillis();
+            forceSpellSelectionForNextInventory = false;
+            consecutiveSpellSelectionFailures = 0;
+            trace(ctx, method, "spell:trusted-click-without-api-selected clicked=true child="
+                    + method.spellWidgetChild);
+            return true;
+        }
+
         forceSpellSelectionForNextInventory = true;
         lastSpellWidgetClickAt = 0L;
         return failSpellSelection(ctx, method, "spell:not-selected-after-primitive-click clicked=" + clicked);
@@ -1250,6 +1259,10 @@ public class EnchantJewelleryProfitScript extends Script {
     }
 
     private Point spellbookClickPoint(APIContext ctx, int child, Point rawPoint, Rectangle inventoryPanel) {
+        if (isLikelySpellbookRawPoint(ctx, rawPoint)) {
+            return rawPoint;
+        }
+
         if (isSpellbookPanelPoint(ctx, rawPoint, inventoryPanel)) {
             return rawPoint;
         }
@@ -1260,6 +1273,28 @@ public class EnchantJewelleryProfitScript extends Script {
         }
 
         return translateFixedSpellbookPoint(ctx, rawPoint);
+    }
+
+    private boolean isLikelySpellbookRawPoint(APIContext ctx, Point point) {
+        if (ctx == null || point == null) {
+            return false;
+        }
+
+        int canvasWidth = Math.max(1, ctx.client().getCanvasWidth());
+        int canvasHeight = Math.max(1, ctx.client().getCanvasHeight());
+        if (canvasWidth <= FIXED_CANVAS_WIDTH + 100 || canvasHeight <= FIXED_CANVAS_HEIGHT + 100) {
+            return point.x >= 520
+                    && point.x < canvasWidth
+                    && point.y >= 160
+                    && point.y < canvasHeight;
+        }
+
+        int panelLeft = Math.max(0, canvasWidth - 320);
+        int panelTop = Math.max(0, canvasHeight - 430);
+        return point.x >= panelLeft
+                && point.x < canvasWidth
+                && point.y >= panelTop
+                && point.y < canvasHeight;
     }
 
     private Point spellbookChildPointFromPanel(int child, Rectangle inventoryPanel) {
