@@ -26,13 +26,15 @@ import java.awt.Rectangle;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.32-strict-spell-confirmation";
+    private static final String SCRIPT_VERSION = "v0.1.33-buy-timeout-spell-retry";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int FIXED_CANVAS_WIDTH = 765;
     private static final int FIXED_CANVAS_HEIGHT = 503;
@@ -60,7 +62,11 @@ public class EnchantJewelleryProfitScript extends Script {
     private static final long MAX_METHOD_REFRESH_MS = 30 * 60_000L;
     private static final long NO_PROFIT_REFRESH_MS = 4 * 60_000L;
     private static final long TRACE_THROTTLE_MS = 2_500L;
-    private static final double BUY_MARKUP = 1.10D;
+    private static final long BUY_OFFER_FILL_TIMEOUT_MS = 90_000L;
+    private static final long METHOD_MARKET_COOLDOWN_MS = 45 * 60_000L;
+    private static final int MAX_WRONG_SPELL_RECOVERY_ATTEMPTS = 3;
+    private static final long WRONG_SPELL_RECOVERY_WINDOW_MS = 2 * 60_000L;
+    private static final double BUY_MARKUP = 1.25D;
     private static final double INSTANT_OUTPUT_SELL_MARKDOWN = 0.90D;
     private static final double GE_TAX_RATE = 0.02D;
     private static final String COINS = "Coins";
@@ -80,8 +86,8 @@ public class EnchantJewelleryProfitScript extends Script {
                     1860,
                     120,
                     9,
-                    280,
-                    700
+                    108,
+                    220
             ),
             new EnchantMethod(
                     "opal_necklaces",
@@ -96,8 +102,8 @@ public class EnchantJewelleryProfitScript extends Script {
                     1213,
                     90,
                     7,
-                    280,
-                    650
+                    54,
+                    108
             ),
             new EnchantMethod(
                     "sapphire_rings",
@@ -128,8 +134,8 @@ public class EnchantJewelleryProfitScript extends Script {
                     770,
                     80,
                     3,
-                    160,
-                    360
+                    54,
+                    140
             ),
             new EnchantMethod(
                     "emerald_rings",
@@ -144,8 +150,8 @@ public class EnchantJewelleryProfitScript extends Script {
                     854,
                     50,
                     5,
-                    270,
-                    620
+                    54,
+                    160
             ),
             new EnchantMethod(
                     "jade_necklaces",
@@ -160,13 +166,14 @@ public class EnchantJewelleryProfitScript extends Script {
                     2100,
                     200,
                     2,
-                    90,
-                    220
+                    27,
+                    81
             )
     };
 
     private final Queue<GeAction> pendingGeActions = new ArrayDeque<>();
     private final List<GeAction> placedGeActions = new ArrayList<>();
+    private final Map<String, Long> methodCooldownUntil = new HashMap<>();
     private final Pricing pricing = new Pricing();
 
     private Stats stats;
@@ -188,17 +195,17 @@ public class EnchantJewelleryProfitScript extends Script {
     private long nextTraceAt;
     private String lastTraceSignature = "";
     private long lastSpellWidgetClickAt;
+    private long lastWrongSpellAt;
     private int consecutiveSpellSelectionFailures;
+    private int wrongSpellRecoveryAttempts;
     private boolean forceSpellSelectionForNextInventory;
     private EnchantPhase enchantPhase = EnchantPhase.IDLE;
     private boolean wrongSpellDetected;
-    private boolean pausedForWrongSpell;
     private boolean stoppedForNoProfit;
 
     @Override
     public boolean onStart(String... args) {
         stats = new Stats();
-        pausedForWrongSpell = false;
         addTask(new EnchantTask());
         log("Enchant Jewellery Profit " + SCRIPT_VERSION + " started");
         getLogger().info("[Trace] enabled version=" + SCRIPT_VERSION);
@@ -218,14 +225,22 @@ public class EnchantJewelleryProfitScript extends Script {
             wrongSpellDetected = true;
             forceSpellSelectionForNextInventory = true;
             lastSpellWidgetClickAt = 0L;
+            resetEnchantCycle();
             setEnchantPhase(EnchantPhase.RECOVERING);
-            String reason = "Wrong spell selected; paused to avoid unsafe casting";
-            stats.setStatus(reason);
-            getLogger().info("[Trace] wrong-spell-chat-pausing phase=" + enchantPhase.label
+            long now = System.currentTimeMillis();
+            if (now - lastWrongSpellAt > WRONG_SPELL_RECOVERY_WINDOW_MS) {
+                wrongSpellRecoveryAttempts = 0;
+            }
+            lastWrongSpellAt = now;
+            wrongSpellRecoveryAttempts++;
+            stats.setStatus("Wrong spell clicked; reselecting enchant spell");
+            getLogger().info("[Trace] wrong-spell-chat-recovering attempt=" + wrongSpellRecoveryAttempts
+                    + " phase=" + enchantPhase.label
                     + " message='" + message + "'");
             APIContext ctx = getAPIContext();
-            if (!pausedForWrongSpell && ctx != null) {
-                pausedForWrongSpell = true;
+            if (wrongSpellRecoveryAttempts >= MAX_WRONG_SPELL_RECOVERY_ATTEMPTS && ctx != null) {
+                String reason = "Wrong spell selected repeatedly; paused to avoid unsafe casting";
+                stats.setStatus(reason);
                 ctx.script().pause(reason);
             }
         }
@@ -433,6 +448,9 @@ public class EnchantJewelleryProfitScript extends Script {
             if (level < method.requiredMagic) {
                 continue;
             }
+            if (methodInCooldown(method)) {
+                continue;
+            }
             Quote quote = pricing.quote(ctx, method);
             if (quote.hasPrices()
                     && quote.profitPerCast >= Math.max(MIN_PROFIT_PER_CAST, method.minProfit)) {
@@ -466,6 +484,64 @@ public class EnchantJewelleryProfitScript extends Script {
             weight = Math.max(1, weight / 3);
         }
         return Math.max(1, weight);
+    }
+
+    private boolean methodInCooldown(EnchantMethod method) {
+        if (method == null) {
+            return false;
+        }
+
+        Long until = methodCooldownUntil.get(method.key);
+        if (until == null) {
+            return false;
+        }
+
+        long now = System.currentTimeMillis();
+        if (now >= until) {
+            methodCooldownUntil.remove(method.key);
+            return false;
+        }
+
+        return true;
+    }
+
+    private void cooldownMethod(String methodKey, String reason) {
+        if (methodKey == null || methodKey.isBlank()) {
+            return;
+        }
+
+        long until = System.currentTimeMillis() + METHOD_MARKET_COOLDOWN_MS;
+        methodCooldownUntil.put(methodKey, until);
+        EnchantMethod method = methodByKey(methodKey);
+        String label = method == null ? methodKey : method.label;
+        log("Cooling down " + label + " for " + cooldownText(METHOD_MARKET_COOLDOWN_MS)
+                + ": " + reason);
+
+        if (activeMethod != null && activeMethod.key.equals(methodKey)) {
+            activeMethod = null;
+            activeQuote = null;
+            nextMethodRefreshAt = 0L;
+            resetEnchantCycle();
+        }
+    }
+
+    private EnchantMethod methodByKey(String methodKey) {
+        if (methodKey == null) {
+            return null;
+        }
+        for (EnchantMethod method : METHODS) {
+            if (method.key.equals(methodKey)) {
+                return method;
+            }
+        }
+        return null;
+    }
+
+    private String cooldownText(long millis) {
+        long seconds = Math.max(0L, millis / 1000L);
+        long minutes = seconds / 60L;
+        long secs = seconds % 60L;
+        return String.format("%02d:%02d", minutes, secs);
     }
 
     private boolean preparePendingRotationSaleOnly(APIContext ctx) {
@@ -609,7 +685,7 @@ public class EnchantJewelleryProfitScript extends Script {
             return false;
         }
 
-        queueSupplyBuy(ctx, method.staff, 1, pricing.quickBuyPrice(ctx, method.staff, 1500L));
+        queueSupplyBuy(ctx, null, method.staff, 1, pricing.quickBuyPrice(ctx, method.staff, 1500L));
         closeBank(ctx, "Going to GE for " + method.staff);
         return false;
     }
@@ -663,19 +739,26 @@ public class EnchantJewelleryProfitScript extends Script {
         }
 
         if (inputsToBuy > 0) {
-            queueSupplyBuy(ctx, method.inputItem, inputsToBuy, pricing.quickBuyPrice(ctx, method.inputItem, activeQuote.inputBuyPrice));
+            queueSupplyBuy(ctx, method, method.inputItem, inputsToBuy, pricing.quickBuyPrice(ctx, method.inputItem, activeQuote.inputBuyPrice));
         }
         if (cosmicsToBuy > 0) {
-            queueSupplyBuy(ctx, COSMIC_RUNE, cosmicsToBuy, pricing.quickBuyPrice(ctx, COSMIC_RUNE, activeQuote.cosmicBuyPrice));
+            queueSupplyBuy(ctx, null, COSMIC_RUNE, cosmicsToBuy, pricing.quickBuyPrice(ctx, COSMIC_RUNE, activeQuote.cosmicBuyPrice));
         }
         closeBank(ctx, "Going to GE for " + method.label + " restock");
     }
 
-    private void queueSupplyBuy(APIContext ctx, String itemName, int quantity, int price) {
+    private void queueSupplyBuy(APIContext ctx, EnchantMethod method, String itemName, int quantity, int price) {
         if (quantity <= 0) {
             return;
         }
-        pendingGeActions.add(GeAction.buy(itemName, quantity, price));
+        boolean cooldownOnStall = method != null && namesMatch(itemName, method.inputItem);
+        pendingGeActions.add(GeAction.buy(
+                itemName,
+                quantity,
+                price,
+                method == null ? null : method.key,
+                cooldownOnStall
+        ));
         stats.lastGeAction = "Queued buy " + quantity + "x " + itemName + " @ " + price;
         log(stats.lastGeAction);
     }
@@ -904,6 +987,17 @@ public class EnchantJewelleryProfitScript extends Script {
             trace(ctx, method, "enchant:converted=" + converted);
         }
 
+        if (wrongSpellDetected) {
+            resetEnchantCycle();
+            forceSpellSelectionForNextInventory = true;
+            lastSpellWidgetClickAt = 0L;
+            setEnchantPhase(EnchantPhase.RECOVERING);
+            stats.setStatus("Wrong spell detected; retrying enchant selection");
+            trace(ctx, method, "enchant:wrong-spell-retry");
+            Time.sleep(700, 1100);
+            return;
+        }
+
         int currentInput = ctx.inventory().getCount(method.inputItem);
         int currentOutput = ctx.inventory().getCount(method.outputItem);
         if (cast || converted > 0 || ctx.localPlayer().isAnimating()) {
@@ -1003,7 +1097,9 @@ public class EnchantJewelleryProfitScript extends Script {
             return false;
         }
 
-        if (ctx.magic().isSpellSelected()) {
+        if (ctx.magic().isSpellSelected()
+                && !forceSpellSelectionForNextInventory
+                && !wrongSpellDetected) {
             setEnchantPhase(EnchantPhase.CLICKING_MATERIAL);
             trace(ctx, method, "cast:preselected-spell-click-material");
             if (!openInventoryTab(ctx)) {
@@ -1085,7 +1181,9 @@ public class EnchantJewelleryProfitScript extends Script {
         if (ctx.magic().isSpellSelected()) {
             lastSpellWidgetClickAt = System.currentTimeMillis();
             forceSpellSelectionForNextInventory = false;
+            wrongSpellDetected = false;
             consecutiveSpellSelectionFailures = 0;
+            wrongSpellRecoveryAttempts = 0;
             trace(ctx, method, "spell:selected-after-primitive-click clicked=" + clicked);
             return true;
         }
@@ -1620,6 +1718,7 @@ public class EnchantJewelleryProfitScript extends Script {
         }
 
         placedGeActions.add(action);
+        action.placedAt = System.currentTimeMillis();
         nextGeCollectAt = System.currentTimeMillis() + 4_000L;
     }
 
@@ -1630,12 +1729,47 @@ public class EnchantJewelleryProfitScript extends Script {
             return;
         }
 
+        long now = System.currentTimeMillis();
         int waiting = 0;
+        List<GeAction> stalledActions = new ArrayList<>();
         for (GeAction action : placedGeActions) {
             GrandExchangeSlot slot = findSlot(ctx, action);
             if (slot != null && !slot.isCompleted() && !slot.canCollect()) {
+                if (action.cooldownOnStall
+                        && action.placedAt > 0L
+                        && now - action.placedAt >= BUY_OFFER_FILL_TIMEOUT_MS) {
+                    stats.setStatus("GE buy stalled; aborting " + action.itemName);
+                    log("GE buy stalled for " + action.describe()
+                            + " after " + cooldownText(now - action.placedAt));
+                    boolean aborted = false;
+                    try {
+                        aborted = slot.abortOffer();
+                    } catch (RuntimeException ignored) {
+                        // The next GE pass can retry collection/cancellation state.
+                    }
+                    if (!aborted) {
+                        waiting++;
+                        continue;
+                    }
+                    stalledActions.add(action);
+                    cooldownMethod(action.methodKey, "material buy did not fill quickly");
+                    continue;
+                }
                 waiting++;
             }
+        }
+
+        if (!stalledActions.isEmpty()) {
+            placedGeActions.removeAll(stalledActions);
+            try {
+                ctx.grandExchange().collectToBank();
+            } catch (RuntimeException ignored) {
+                // Best-effort collect after aborting partial offers.
+            }
+            Time.sleep(900, 1400);
+            nextMethodRefreshAt = 0L;
+            stats.setStatus("Aborted stalled buy; refreshing method selector");
+            return;
         }
 
         if (waiting > 0) {
@@ -2107,8 +2241,8 @@ public class EnchantJewelleryProfitScript extends Script {
             ItemDetail input = itemDetail(ctx, method.inputItem);
             ItemDetail cosmic = itemDetail(ctx, COSMIC_RUNE);
             ItemDetail output = itemDetail(ctx, method.outputItem);
-            int inputBuy = firstPositive(highPrice(input), lowPrice(input), method.fallbackInputBuy);
-            int cosmicBuy = firstPositive(highPrice(cosmic), lowPrice(cosmic), 113L);
+            int inputBuy = instantBuyFromMarket(firstPositive(highPrice(input), lowPrice(input), method.fallbackInputBuy));
+            int cosmicBuy = instantBuyFromMarket(firstPositive(highPrice(cosmic), lowPrice(cosmic), 113L));
             int outputSell = firstPositive(lowPrice(output), highPrice(output), method.fallbackOutputSell);
             int instantOutputSell = instantSellFromMarket(outputSell);
             long cost = (long) inputBuy + cosmicBuy;
@@ -2122,7 +2256,7 @@ public class EnchantJewelleryProfitScript extends Script {
         private int quickBuyPrice(APIContext ctx, String itemName, long fallbackPrice) {
             ItemDetail detail = itemDetail(ctx, itemName);
             long market = firstPositive(highPrice(detail), lowPrice(detail), fallbackPrice);
-            return clampToInt(Math.max(1L, Math.round(Math.ceil(market * BUY_MARKUP))));
+            return instantBuyFromMarket(market);
         }
 
         private int instantOutputSellPrice(APIContext ctx, String itemName, long fallbackPrice) {
@@ -2133,6 +2267,10 @@ public class EnchantJewelleryProfitScript extends Script {
 
         private int instantSellFromMarket(long market) {
             return clampToInt(Math.max(1L, Math.round(Math.floor(market * INSTANT_OUTPUT_SELL_MARKDOWN))));
+        }
+
+        private int instantBuyFromMarket(long market) {
+            return clampToInt(Math.max(1L, Math.round(Math.ceil(market * BUY_MARKUP))));
         }
 
         private ItemDetail itemDetail(APIContext ctx, String itemName) {
@@ -2233,20 +2371,38 @@ public class EnchantJewelleryProfitScript extends Script {
         private final String itemName;
         private final int quantity;
         private final int price;
+        private final String methodKey;
+        private final boolean cooldownOnStall;
+        private long placedAt;
 
-        private GeAction(GeActionType type, String itemName, int quantity, int price) {
+        private GeAction(
+                GeActionType type,
+                String itemName,
+                int quantity,
+                int price,
+                String methodKey,
+                boolean cooldownOnStall
+        ) {
             this.type = type;
             this.itemName = itemName;
             this.quantity = quantity;
             this.price = price;
+            this.methodKey = methodKey;
+            this.cooldownOnStall = cooldownOnStall;
         }
 
-        private static GeAction buy(String itemName, int quantity, int price) {
-            return new GeAction(GeActionType.BUY, itemName, quantity, price);
+        private static GeAction buy(
+                String itemName,
+                int quantity,
+                int price,
+                String methodKey,
+                boolean cooldownOnStall
+        ) {
+            return new GeAction(GeActionType.BUY, itemName, quantity, price, methodKey, cooldownOnStall);
         }
 
         private static GeAction sell(String itemName, int quantity, int price) {
-            return new GeAction(GeActionType.SELL, itemName, quantity, price);
+            return new GeAction(GeActionType.SELL, itemName, quantity, price, null, false);
         }
 
         private String describe() {

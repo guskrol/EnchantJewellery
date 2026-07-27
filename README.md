@@ -13,7 +13,7 @@ Current enabled methods:
 
 Stable tag: `stable-v0.1.26-panel-relative-spellbook-clicks`.
 
-Current build: `v0.1.32-strict-spell-confirmation`.
+Current build: `v0.1.33-buy-timeout-spell-retry`.
 
 This build keeps the stable casting flow isolated while adding conservative Lvl-1/Lvl-2 method selection:
 
@@ -21,6 +21,7 @@ This build keeps the stable casting flow isolated while adding conservative Lvl-
 - filters by Magic level and per-method minimum profit;
 - favors more liquid methods with higher selector weights;
 - uses smaller restock batches for lower-liquidity outputs;
+- aborts material buys that do not fill quickly and cools down that method;
 - sells produced output at the end of each rotation before selecting or preparing the next method;
 - places output sell offers with aggressive instant-sell pricing;
 - buys missing jewellery and Cosmic runes through the Grand Exchange;
@@ -40,6 +41,8 @@ This build keeps the stable casting flow isolated while adding conservative Lvl-
 `v0.1.31` was reverted because trusting a spell-widget click without API confirmation could cast the wrong spell.
 
 `v0.1.32` restores strict spell confirmation: the script only clicks jewellery material when the client confirms a spell is selected, and it pauses immediately on wrong-spell chat.
+
+`v0.1.33` adds GE buy-stall protection and wrong-spell recovery. Material buy offers that do not fill within 90 seconds are aborted, the method is cooled down for 45 minutes, and the selector moves on. Wrong-spell chat now forces a clean spell reselection instead of immediately pausing.
 
 Runtime decisions are logged to the EpicBot client log with the `[Trace]` prefix.
 
