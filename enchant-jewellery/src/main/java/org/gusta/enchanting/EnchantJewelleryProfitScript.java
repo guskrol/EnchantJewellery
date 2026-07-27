@@ -32,7 +32,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.31-trust-visible-spell-click";
+    private static final String SCRIPT_VERSION = "v0.1.32-strict-spell-confirmation";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int FIXED_CANVAS_WIDTH = 765;
     private static final int FIXED_CANVAS_HEIGHT = 503;
@@ -192,11 +192,13 @@ public class EnchantJewelleryProfitScript extends Script {
     private boolean forceSpellSelectionForNextInventory;
     private EnchantPhase enchantPhase = EnchantPhase.IDLE;
     private boolean wrongSpellDetected;
+    private boolean pausedForWrongSpell;
     private boolean stoppedForNoProfit;
 
     @Override
     public boolean onStart(String... args) {
         stats = new Stats();
+        pausedForWrongSpell = false;
         addTask(new EnchantTask());
         log("Enchant Jewellery Profit " + SCRIPT_VERSION + " started");
         getLogger().info("[Trace] enabled version=" + SCRIPT_VERSION);
@@ -217,9 +219,15 @@ public class EnchantJewelleryProfitScript extends Script {
             forceSpellSelectionForNextInventory = true;
             lastSpellWidgetClickAt = 0L;
             setEnchantPhase(EnchantPhase.RECOVERING);
-            stats.setStatus("Wrong spell selected; resetting enchant flow");
-            getLogger().info("[Trace] wrong-spell-chat phase=" + enchantPhase.label
+            String reason = "Wrong spell selected; paused to avoid unsafe casting";
+            stats.setStatus(reason);
+            getLogger().info("[Trace] wrong-spell-chat-pausing phase=" + enchantPhase.label
                     + " message='" + message + "'");
+            APIContext ctx = getAPIContext();
+            if (!pausedForWrongSpell && ctx != null) {
+                pausedForWrongSpell = true;
+                ctx.script().pause(reason);
+            }
         }
         if (lower.contains("you do not have enough")
                 || lower.contains("not enough")
@@ -1082,15 +1090,6 @@ public class EnchantJewelleryProfitScript extends Script {
             return true;
         }
 
-        if (clicked) {
-            lastSpellWidgetClickAt = System.currentTimeMillis();
-            forceSpellSelectionForNextInventory = false;
-            consecutiveSpellSelectionFailures = 0;
-            trace(ctx, method, "spell:trusted-click-without-api-selected clicked=true child="
-                    + method.spellWidgetChild);
-            return true;
-        }
-
         forceSpellSelectionForNextInventory = true;
         lastSpellWidgetClickAt = 0L;
         return failSpellSelection(ctx, method, "spell:not-selected-after-primitive-click clicked=" + clicked);
@@ -1106,26 +1105,17 @@ public class EnchantJewelleryProfitScript extends Script {
         stats.setStatus("Clicking material after spell: " + method.inputItem);
         humanItemPause();
         long millisSinceSpellClick = System.currentTimeMillis() - lastSpellWidgetClickAt;
-        boolean directClickExpected = ctx.magic().isSpellSelected()
-                || (lastSpellWidgetClickAt > 0L && millisSinceSpellClick < 8_000L);
-        if (!directClickExpected) {
-            stats.setStatus("No recent enchant spell click; refusing material click");
+        if (!ctx.magic().isSpellSelected()) {
+            stats.setStatus("No confirmed enchant spell selected; refusing material click");
             forceSpellSelectionForNextInventory = true;
             lastSpellWidgetClickAt = 0L;
-            trace(ctx, method, "item:refused-no-recent-spell-click");
+            trace(ctx, method, "item:refused-no-confirmed-spell-click sinceSpellMs=" + millisSinceSpellClick);
             return false;
         }
 
         int inputBefore = ctx.inventory().getCount(true, method.inputItem);
         int outputBefore = ctx.inventory().getCount(true, method.outputItem);
-        boolean clicked;
-        if (ctx.magic().isSpellSelected()) {
-            clicked = clickInventoryItemByMouse(ctx, item) || item.click(false);
-        } else {
-            clicked = ctx.menu().interact("Cast", method.inputItem, item, false)
-                    || ctx.menu().interact("Cast", item, false)
-                    || item.interact("Cast");
-        }
+        boolean clicked = clickInventoryItemByMouse(ctx, item) || item.click(false);
         trace(ctx, method, "item:clicked=" + clicked
                 + " apiSpellSelected=" + ctx.magic().isSpellSelected()
                 + " sinceSpellMs=" + millisSinceSpellClick
@@ -1259,10 +1249,6 @@ public class EnchantJewelleryProfitScript extends Script {
     }
 
     private Point spellbookClickPoint(APIContext ctx, int child, Point rawPoint, Rectangle inventoryPanel) {
-        if (isLikelySpellbookRawPoint(ctx, rawPoint)) {
-            return rawPoint;
-        }
-
         if (isSpellbookPanelPoint(ctx, rawPoint, inventoryPanel)) {
             return rawPoint;
         }
@@ -1273,28 +1259,6 @@ public class EnchantJewelleryProfitScript extends Script {
         }
 
         return translateFixedSpellbookPoint(ctx, rawPoint);
-    }
-
-    private boolean isLikelySpellbookRawPoint(APIContext ctx, Point point) {
-        if (ctx == null || point == null) {
-            return false;
-        }
-
-        int canvasWidth = Math.max(1, ctx.client().getCanvasWidth());
-        int canvasHeight = Math.max(1, ctx.client().getCanvasHeight());
-        if (canvasWidth <= FIXED_CANVAS_WIDTH + 100 || canvasHeight <= FIXED_CANVAS_HEIGHT + 100) {
-            return point.x >= 520
-                    && point.x < canvasWidth
-                    && point.y >= 160
-                    && point.y < canvasHeight;
-        }
-
-        int panelLeft = Math.max(0, canvasWidth - 320);
-        int panelTop = Math.max(0, canvasHeight - 430);
-        return point.x >= panelLeft
-                && point.x < canvasWidth
-                && point.y >= panelTop
-                && point.y < canvasHeight;
     }
 
     private Point spellbookChildPointFromPanel(int child, Rectangle inventoryPanel) {

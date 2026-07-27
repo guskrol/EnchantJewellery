@@ -13,7 +13,7 @@ Current enabled methods:
 
 Stable tag: `stable-v0.1.26-panel-relative-spellbook-clicks`.
 
-Current build: `v0.1.31-trust-visible-spell-click`.
+Current build: `v0.1.32-strict-spell-confirmation`.
 
 This build keeps the stable casting flow isolated while adding conservative Lvl-1/Lvl-2 method selection:
 
@@ -37,7 +37,9 @@ This build keeps the stable casting flow isolated while adding conservative Lvl-
 
 `v0.1.30` forces a full output sale when each rotation ends, using aggressive Grand Exchange sell pricing before the next method is prepared.
 
-`v0.1.31` improves spell selection on resizeable clients by trusting visible spell-widget click points when the Magic API does not immediately report a selected spell.
+`v0.1.31` was reverted because trusting a spell-widget click without API confirmation could cast the wrong spell.
+
+`v0.1.32` restores strict spell confirmation: the script only clicks jewellery material when the client confirms a spell is selected, and it pauses immediately on wrong-spell chat.
 
 Runtime decisions are logged to the EpicBot client log with the `[Trace]` prefix.
 
