@@ -6,7 +6,7 @@ EpicBot OSRS script for the P2P Sapphire ring enchant loop:
 
 Stable tag: `stable-v0.1.26-panel-relative-spellbook-clicks`.
 
-Current build: `v0.1.27-sell-output-on-method-switch`.
+Current build: `v0.1.28-price-refresh-countdown`.
 
 This build intentionally removes the dynamic OSRS Wiki price selector, extra jewellery methods, watchdog, and file diagnostics while we isolate the client crash. It uses the older sapphire-only core flow:
 
@@ -18,6 +18,8 @@ This build intentionally removes the dynamic OSRS Wiki price selector, extra jew
 - banks/sells Ring of recoil outputs.
 
 `v0.1.27` keeps the stable casting flow isolated and adds one rule for the future dynamic selector: whenever the script switches to another enchant method, it must sell the previous method's produced output before preparing or buying the next item.
+
+`v0.1.28` adds the next price-check countdown to the in-game overlay.
 
 Runtime decisions are logged to the EpicBot client log with the `[Trace]` prefix.
 

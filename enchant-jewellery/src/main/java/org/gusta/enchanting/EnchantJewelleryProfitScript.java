@@ -32,7 +32,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.27-sell-output-on-method-switch";
+    private static final String SCRIPT_VERSION = "v0.1.28-price-refresh-countdown";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int FIXED_CANVAS_WIDTH = 765;
     private static final int FIXED_CANVAS_HEIGHT = 503;
@@ -156,7 +156,7 @@ public class EnchantJewelleryProfitScript extends Script {
         int x = 8;
         int y = 8;
         int width = 330;
-        int height = 228;
+        int height = 244;
         paint.fill(new Rectangle(x, y, width, height), new Color(18, 22, 28, 190));
         paint.draw(new Rectangle(x, y, width, height), new Color(230, 235, 245, 210), 1);
 
@@ -169,6 +169,8 @@ public class EnchantJewelleryProfitScript extends Script {
         line += 16;
         paint.drawText("Method: " + (activeMethod == null ? "-" : activeMethod.label)
                 + " | Phase: " + enchantPhase.label, x + 12, line, new Color(220, 235, 255), 12);
+        line += 16;
+        paint.drawText("Next price check: " + methodRefreshCountdown(), x + 12, line, new Color(180, 225, 255), 12);
         line += 16;
         paint.drawText("Magic: " + magicLevel(ctx) + " | XP: " + stats.xpGained(ctx)
                 + " (" + stats.xpPerHour(ctx) + "/h)", x + 12, line, new Color(220, 235, 255), 12);
@@ -1914,6 +1916,20 @@ public class EnchantJewelleryProfitScript extends Script {
             return value;
         }
         return value.substring(0, Math.max(1, maxChars - 3)) + "...";
+    }
+
+    private String methodRefreshCountdown() {
+        if (nextMethodRefreshAt <= 0L) {
+            return "pending";
+        }
+        long remainingMs = Math.max(0L, nextMethodRefreshAt - System.currentTimeMillis());
+        if (remainingMs <= 0L) {
+            return "due now";
+        }
+        long seconds = (remainingMs + 999L) / 1000L;
+        long minutes = seconds / 60L;
+        long secs = seconds % 60L;
+        return String.format("%02d:%02d", minutes, secs);
     }
 
     private int clampToInt(long value) {
