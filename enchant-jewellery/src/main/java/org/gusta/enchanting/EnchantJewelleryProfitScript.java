@@ -32,7 +32,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.28-price-refresh-countdown";
+    private static final String SCRIPT_VERSION = "v0.1.29-lvl1-lvl2-market-methods";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int FIXED_CANVAS_WIDTH = 765;
     private static final int FIXED_CANVAS_HEIGHT = 503;
@@ -46,8 +46,6 @@ public class EnchantJewelleryProfitScript extends Script {
     private static final int MIN_PROFIT_PER_CAST = 25;
     private static final int MIN_BATCH_CASTS = 160;
     private static final int MAX_BATCH_CASTS = 420;
-    private static final int RESTOCK_MIN_CASTS = 540;
-    private static final int RESTOCK_MAX_CASTS = 1080;
     private static final long ENCHANT_BATCH_STALL_MS = 15_000L;
     private static final int HUMAN_WIDGET_MIN_MS = 900;
     private static final int HUMAN_WIDGET_MAX_MS = 1_650;
@@ -57,7 +55,10 @@ public class EnchantJewelleryProfitScript extends Script {
     private static final int SPELLBOOK_GROUP = 218;
     private static final int JEWELLERY_ENCHANTMENTS_CHILD = 15;
     private static final int LEVEL_1_ENCHANT_CHILD = 16;
-    private static final long METHOD_REFRESH_MS = 4 * 60_000L;
+    private static final int LEVEL_2_ENCHANT_CHILD = 11;
+    private static final long MIN_METHOD_REFRESH_MS = 20 * 60_000L;
+    private static final long MAX_METHOD_REFRESH_MS = 30 * 60_000L;
+    private static final long NO_PROFIT_REFRESH_MS = 4 * 60_000L;
     private static final long TRACE_THROTTLE_MS = 2_500L;
     private static final double BUY_MARKUP = 1.10D;
     private static final double SELL_MARKDOWN = 0.98D;
@@ -67,6 +68,38 @@ public class EnchantJewelleryProfitScript extends Script {
 
     private static final EnchantMethod[] METHODS = {
             new EnchantMethod(
+                    "opal_bracelets",
+                    "Opal bracelets",
+                    7,
+                    Spell.Modern.LEVEL_1_ENCHANT,
+                    LEVEL_1_ENCHANT_CHILD,
+                    "Staff of water",
+                    "Opal bracelet",
+                    "Expeditious bracelet",
+                    1100,
+                    1860,
+                    120,
+                    9,
+                    280,
+                    700
+            ),
+            new EnchantMethod(
+                    "opal_necklaces",
+                    "Opal necklaces",
+                    7,
+                    Spell.Modern.LEVEL_1_ENCHANT,
+                    LEVEL_1_ENCHANT_CHILD,
+                    "Staff of water",
+                    "Opal necklace",
+                    "Dodgy necklace",
+                    635,
+                    1213,
+                    90,
+                    7,
+                    280,
+                    650
+            ),
+            new EnchantMethod(
                     "sapphire_rings",
                     "Sapphire rings",
                     7,
@@ -75,10 +108,60 @@ public class EnchantJewelleryProfitScript extends Script {
                     "Staff of water",
                     "Sapphire ring",
                     "Ring of recoil",
-                    377,
-                    830,
+                    364,
+                    916,
                     35,
-                    5
+                    7,
+                    540,
+                    1080
+            ),
+            new EnchantMethod(
+                    "sapphire_necklaces",
+                    "Sapphire necklaces",
+                    7,
+                    Spell.Modern.LEVEL_1_ENCHANT,
+                    LEVEL_1_ENCHANT_CHILD,
+                    "Staff of water",
+                    "Sapphire necklace",
+                    "Games necklace(8)",
+                    429,
+                    770,
+                    80,
+                    3,
+                    160,
+                    360
+            ),
+            new EnchantMethod(
+                    "emerald_rings",
+                    "Emerald rings",
+                    27,
+                    Spell.Modern.LEVEL_2_ENCHANT,
+                    LEVEL_2_ENCHANT_CHILD,
+                    "Staff of air",
+                    "Emerald ring",
+                    "Ring of dueling(8)",
+                    561,
+                    854,
+                    50,
+                    5,
+                    270,
+                    620
+            ),
+            new EnchantMethod(
+                    "jade_necklaces",
+                    "Jade necklaces",
+                    27,
+                    Spell.Modern.LEVEL_2_ENCHANT,
+                    LEVEL_2_ENCHANT_CHILD,
+                    "Staff of air",
+                    "Jade necklace",
+                    "Necklace of passage(5)",
+                    1394,
+                    2100,
+                    200,
+                    2,
+                    90,
+                    220
             )
     };
 
@@ -236,7 +319,7 @@ public class EnchantJewelleryProfitScript extends Script {
                 if (activeMethod == null || !activeMethod.key.equals(readyMethod.key)) {
                     activeMethod = readyMethod;
                     activeQuote = pricing.quote(ctx, readyMethod);
-                    nextMethodRefreshAt = System.currentTimeMillis() + METHOD_REFRESH_MS;
+                    nextMethodRefreshAt = System.currentTimeMillis() + nextMethodRefreshDelay();
                 }
                 trace(ctx, readyMethod, "run:ready-inventory-before-ge");
                 enchantInventory(ctx, readyMethod);
@@ -292,7 +375,7 @@ public class EnchantJewelleryProfitScript extends Script {
             logOccasionally("No profitable jewellery enchant available. Magic=" + magicLevel(ctx)
                     + " margins=" + marginSummary(ctx));
             Time.sleep(2500, 4000);
-            nextMethodRefreshAt = now + METHOD_REFRESH_MS;
+            nextMethodRefreshAt = now + NO_PROFIT_REFRESH_MS;
             return false;
         }
 
@@ -310,7 +393,7 @@ public class EnchantJewelleryProfitScript extends Script {
         activeBatchTargetCasts = ThreadLocalRandom.current().nextInt(MIN_BATCH_CASTS, MAX_BATCH_CASTS + 1);
         activeBatchCasts = 0;
         resetEnchantCycle();
-        nextMethodRefreshAt = now + METHOD_REFRESH_MS;
+        nextMethodRefreshAt = now + nextMethodRefreshDelay();
 
         log("Selected enchant: " + activeMethod.label
                 + " profit/cast=" + activeQuote.profitPerCast
@@ -510,7 +593,9 @@ public class EnchantJewelleryProfitScript extends Script {
             return;
         }
 
-        int targetCasts = ThreadLocalRandom.current().nextInt(RESTOCK_MIN_CASTS, RESTOCK_MAX_CASTS + 1);
+        int minRestockCasts = Math.max(INVENTORY_INPUT_AMOUNT, Math.min(method.restockMinCasts, method.restockMaxCasts));
+        int maxRestockCasts = Math.max(minRestockCasts, method.restockMaxCasts);
+        int targetCasts = ThreadLocalRandom.current().nextInt(minRestockCasts, maxRestockCasts + 1);
         int inputsAvailable = ctx.inventory().getCount(method.inputItem) + ctx.bank().getCount(method.inputItem);
         int cosmicsAvailable = ctx.inventory().getCount(true, COSMIC_RUNE) + ctx.bank().getCount(COSMIC_RUNE);
         int inputsToBuy = Math.max(0, targetCasts - inputsAvailable);
@@ -961,9 +1046,9 @@ public class EnchantJewelleryProfitScript extends Script {
                 () -> ctx.magic().isSpellSelected() || wrongSpellDetected,
                 100);
 
-        if (!ctx.magic().isSpellSelected() && method.spellWidgetChild == LEVEL_1_ENCHANT_CHILD) {
-            stats.setStatus("Lvl-1 not selected via widget bounds; using resizeable fallback");
-            clicked = clickResizableLvl1EnchantFallback(ctx, method, inventoryPanel) || clicked;
+        if (!ctx.magic().isSpellSelected() && hasResizableEnchantFallback(method.spellWidgetChild)) {
+            stats.setStatus(method.spell.getSpellName() + " not selected via widget bounds; using resizeable fallback");
+            clicked = clickResizableEnchantFallback(ctx, method, inventoryPanel) || clicked;
             Time.sleep(HUMAN_WIDGET_MIN_MS, HUMAN_WIDGET_MAX_MS,
                     () -> ctx.magic().isSpellSelected() || wrongSpellDetected,
                     100);
@@ -1001,7 +1086,7 @@ public class EnchantJewelleryProfitScript extends Script {
         boolean directClickExpected = ctx.magic().isSpellSelected()
                 || (lastSpellWidgetClickAt > 0L && millisSinceSpellClick < 8_000L);
         if (!directClickExpected) {
-            stats.setStatus("No recent Lvl-1 Enchant click; refusing material click");
+            stats.setStatus("No recent enchant spell click; refusing material click");
             forceSpellSelectionForNextInventory = true;
             lastSpellWidgetClickAt = 0L;
             trace(ctx, method, "item:refused-no-recent-spell-click");
@@ -1036,20 +1121,30 @@ public class EnchantJewelleryProfitScript extends Script {
         return clicked;
     }
 
-    private boolean clickResizableLvl1EnchantFallback(APIContext ctx, EnchantMethod method, Rectangle inventoryPanel) {
+    private boolean hasResizableEnchantFallback(int child) {
+        return child == LEVEL_1_ENCHANT_CHILD || child == LEVEL_2_ENCHANT_CHILD;
+    }
+
+    private boolean clickResizableEnchantFallback(APIContext ctx, EnchantMethod method, Rectangle inventoryPanel) {
         int canvasWidth = Math.max(1, ctx.client().getCanvasWidth());
         int canvasHeight = Math.max(1, ctx.client().getCanvasHeight());
         if (inventoryPanel == null) {
-            trace(ctx, method, "spell:lvl1-fallback-skipped-no-panel canvas="
+            trace(ctx, method, "spell:resizeable-fallback-skipped-no-panel canvas="
                     + canvasWidth + "x" + canvasHeight);
             return false;
         }
 
+        Point center = spellbookChildPointFromPanel(method.spellWidgetChild, inventoryPanel);
+        if (center == null) {
+            trace(ctx, method, "spell:resizeable-fallback-skipped-no-point child=" + method.spellWidgetChild);
+            return false;
+        }
+
         Point[] candidates = {
-                new Point(inventoryPanel.x + 79, inventoryPanel.y + 44),
-                new Point(inventoryPanel.x + 74, inventoryPanel.y + 44),
-                new Point(inventoryPanel.x + 79, inventoryPanel.y + 52),
-                new Point(inventoryPanel.x + 66, inventoryPanel.y + 52)
+                center,
+                new Point(center.x - 5, center.y),
+                new Point(center.x, center.y + 8),
+                new Point(center.x - 13, center.y + 8)
         };
 
         for (int i = 0; i < candidates.length; i++) {
@@ -1059,24 +1154,26 @@ public class EnchantJewelleryProfitScript extends Script {
                     base.y + ThreadLocalRandom.current().nextInt(-4, 5)
             );
             if (!isSpellbookPanelPoint(ctx, point, inventoryPanel)) {
-                trace(ctx, method, "spell:lvl1-fallback-refused index=" + i
+                trace(ctx, method, "spell:resizeable-fallback-refused index=" + i
                         + " point=" + point.x + "," + point.y
                         + " panel=" + rectangleText(inventoryPanel)
                         + " canvas=" + canvasWidth + "x" + canvasHeight);
                 continue;
             }
 
-            trace(ctx, method, "spell:lvl1-fallback-before-click index=" + i
+            trace(ctx, method, "spell:resizeable-fallback-before-click child=" + method.spellWidgetChild
+                    + " index=" + i
                     + " point=" + point.x + "," + point.y
                     + " panel=" + rectangleText(inventoryPanel)
                     + " canvas=" + canvasWidth + "x" + canvasHeight);
             if (!ctx.mouse().move(point)) {
-                trace(ctx, method, "spell:lvl1-fallback-move-failed index=" + i);
+                trace(ctx, method, "spell:resizeable-fallback-move-failed index=" + i);
                 continue;
             }
             Time.sleep(450, 850);
             boolean clicked = ctx.mouse().click(false);
-            trace(ctx, method, "spell:lvl1-fallback-after-click index=" + i
+            trace(ctx, method, "spell:resizeable-fallback-after-click child=" + method.spellWidgetChild
+                    + " index=" + i
                     + " clicked=" + clicked
                     + " spellSelected=" + ctx.magic().isSpellSelected());
             Time.sleep(700, 1100, () -> ctx.magic().isSpellSelected() || wrongSpellDetected, 100);
@@ -1161,6 +1258,9 @@ public class EnchantJewelleryProfitScript extends Script {
         }
         if (child == LEVEL_1_ENCHANT_CHILD) {
             return new Point(inventoryPanel.x + 79, inventoryPanel.y + 44);
+        }
+        if (child == LEVEL_2_ENCHANT_CHILD) {
+            return new Point(inventoryPanel.x + 144, inventoryPanel.y + 44);
         }
         return null;
     }
@@ -1932,6 +2032,10 @@ public class EnchantJewelleryProfitScript extends Script {
         return String.format("%02d:%02d", minutes, secs);
     }
 
+    private long nextMethodRefreshDelay() {
+        return ThreadLocalRandom.current().nextLong(MIN_METHOD_REFRESH_MS, MAX_METHOD_REFRESH_MS + 1);
+    }
+
     private int clampToInt(long value) {
         return (int) Math.max(0L, Math.min(Integer.MAX_VALUE, value));
     }
@@ -1949,6 +2053,8 @@ public class EnchantJewelleryProfitScript extends Script {
         private final long fallbackOutputSell;
         private final int minProfit;
         private final int baseWeight;
+        private final int restockMinCasts;
+        private final int restockMaxCasts;
 
         private EnchantMethod(
                 String key,
@@ -1962,7 +2068,9 @@ public class EnchantJewelleryProfitScript extends Script {
                 long fallbackInputBuy,
                 long fallbackOutputSell,
                 int minProfit,
-                int baseWeight
+                int baseWeight,
+                int restockMinCasts,
+                int restockMaxCasts
         ) {
             this.key = key;
             this.label = label;
@@ -1976,6 +2084,8 @@ public class EnchantJewelleryProfitScript extends Script {
             this.fallbackOutputSell = fallbackOutputSell;
             this.minProfit = minProfit;
             this.baseWeight = baseWeight;
+            this.restockMinCasts = restockMinCasts;
+            this.restockMaxCasts = restockMaxCasts;
         }
     }
 

@@ -1,25 +1,38 @@
 # EnchantJewellery
 
-EpicBot OSRS script for the P2P Sapphire ring enchant loop:
+EpicBot OSRS script for P2P jewellery enchant profit loops.
 
+Current enabled methods:
+
+- Opal bracelet -> Expeditious bracelet
+- Opal necklace -> Dodgy necklace
 - Sapphire ring -> Ring of recoil
+- Sapphire necklace -> Games necklace(8)
+- Emerald ring -> Ring of dueling(8)
+- Jade necklace -> Necklace of passage(5)
 
 Stable tag: `stable-v0.1.26-panel-relative-spellbook-clicks`.
 
-Current build: `v0.1.28-price-refresh-countdown`.
+Current build: `v0.1.29-lvl1-lvl2-market-methods`.
 
-This build intentionally removes the dynamic OSRS Wiki price selector, extra jewellery methods, watchdog, and file diagnostics while we isolate the client crash. It uses the older sapphire-only core flow:
+This build keeps the stable casting flow isolated while adding conservative Lvl-1/Lvl-2 method selection:
 
-- checks Sapphire ring profit using EpicBot client pricing;
-- buys missing Sapphire rings and Cosmic runes through the Grand Exchange;
+- checks method profit using EpicBot client pricing;
+- filters by Magic level and per-method minimum profit;
+- favors more liquid methods with higher selector weights;
+- uses smaller restock batches for lower-liquidity outputs;
+- sells the previous method's output before switching to another method;
+- buys missing jewellery and Cosmic runes through the Grand Exchange;
 - prepares inventory from the bank;
-- uses the live side-panel bounds for `218.15` and `218.16`, only translating widget coordinates when they are outside that panel;
-- clicks the Sapphire ring once to process the full inventory;
-- banks/sells Ring of recoil outputs.
+- uses the live side-panel bounds for `218.15`, `218.16`, and `218.11`, only translating widget coordinates when they are outside that panel;
+- clicks the jewellery material once to process the full inventory;
+- banks/sells produced outputs.
 
 `v0.1.27` keeps the stable casting flow isolated and adds one rule for the future dynamic selector: whenever the script switches to another enchant method, it must sell the previous method's produced output before preparing or buying the next item.
 
 `v0.1.28` adds the next price-check countdown to the in-game overlay.
+
+`v0.1.29` enables selected Lvl-1 and Lvl-2 market-friendly methods and refreshes method selection every 20-30 minutes.
 
 Runtime decisions are logged to the EpicBot client log with the `[Trace]` prefix.
 
