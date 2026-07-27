@@ -32,7 +32,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 @ScriptManifest(name = "Enchant Jewellery Profit", gameType = GameType.OS)
 public class EnchantJewelleryProfitScript extends Script {
-    private static final String SCRIPT_VERSION = "v0.1.29-lvl1-lvl2-market-methods";
+    private static final String SCRIPT_VERSION = "v0.1.30-rotation-instant-output-sell";
     private static final Tile GRAND_EXCHANGE_TILE = new Tile(3164, 3487, 0);
     private static final int FIXED_CANVAS_WIDTH = 765;
     private static final int FIXED_CANVAS_HEIGHT = 503;
@@ -61,7 +61,7 @@ public class EnchantJewelleryProfitScript extends Script {
     private static final long NO_PROFIT_REFRESH_MS = 4 * 60_000L;
     private static final long TRACE_THROTTLE_MS = 2_500L;
     private static final double BUY_MARKUP = 1.10D;
-    private static final double SELL_MARKDOWN = 0.98D;
+    private static final double INSTANT_OUTPUT_SELL_MARKDOWN = 0.90D;
     private static final double GE_TAX_RATE = 0.02D;
     private static final String COINS = "Coins";
     private static final String COSMIC_RUNE = "Cosmic rune";
@@ -172,7 +172,7 @@ public class EnchantJewelleryProfitScript extends Script {
     private Stats stats;
     private EnchantMethod activeMethod;
     private EnchantMethod previousMethod;
-    private EnchantMethod pendingSwitchOutputSaleMethod;
+    private EnchantMethod pendingRotationOutputSaleMethod;
     private Quote activeQuote;
     private int activeBatchTargetCasts;
     private int activeBatchCasts;
@@ -342,6 +342,10 @@ public class EnchantJewelleryProfitScript extends Script {
                 return;
             }
 
+            if (preparePendingRotationSaleOnly(ctx)) {
+                return;
+            }
+
             if (!selectMethod(ctx)) {
                 return;
             }
@@ -368,6 +372,10 @@ public class EnchantJewelleryProfitScript extends Script {
 
         List<Quote> quotes = viableQuotes(ctx);
         if (quotes.isEmpty()) {
+            if (activeMethod != null) {
+                pendingRotationOutputSaleMethod = activeMethod;
+                trace(ctx, activeMethod, "rotation:force-output-sale no-profitable-method");
+            }
             stoppedForNoProfit = true;
             activeMethod = null;
             activeQuote = null;
@@ -382,11 +390,13 @@ public class EnchantJewelleryProfitScript extends Script {
         stoppedForNoProfit = false;
         Quote selected = pickWeightedQuote(ctx, quotes);
         EnchantMethod oldMethod = activeMethod;
+        boolean rotationFinished = oldMethod != null;
         boolean switchingMethod = oldMethod != null && !oldMethod.key.equals(selected.method.key);
         previousMethod = oldMethod;
-        if (switchingMethod) {
-            pendingSwitchOutputSaleMethod = oldMethod;
-            trace(ctx, oldMethod, "method-switch:force-output-sale new=" + selected.method.key);
+        if (rotationFinished) {
+            pendingRotationOutputSaleMethod = oldMethod;
+            trace(ctx, oldMethod, "rotation:force-output-sale selected=" + selected.method.key
+                    + " switching=" + switchingMethod);
         }
         activeMethod = selected.method;
         activeQuote = selected;
@@ -450,6 +460,23 @@ public class EnchantJewelleryProfitScript extends Script {
         return Math.max(1, weight);
     }
 
+    private boolean preparePendingRotationSaleOnly(APIContext ctx) {
+        if (pendingRotationOutputSaleMethod == null) {
+            return false;
+        }
+
+        setEnchantPhase(EnchantPhase.BANKING);
+        if (!openBank(ctx, "selling rotation output")) {
+            return true;
+        }
+
+        if (depositInventoryIfNeeded(ctx, pendingRotationOutputSaleMethod)) {
+            return true;
+        }
+
+        return preparePendingRotationOutputSale(ctx);
+    }
+
     private void prepareInventoryOrRestock(APIContext ctx, EnchantMethod method) {
         setEnchantPhase(EnchantPhase.BANKING);
         if (!openBank(ctx, "preparing " + method.label)) {
@@ -460,7 +487,7 @@ public class EnchantJewelleryProfitScript extends Script {
             return;
         }
 
-        if (preparePendingSwitchOutputSale(ctx)) {
+        if (preparePendingRotationOutputSale(ctx)) {
             return;
         }
 
@@ -660,43 +687,32 @@ public class EnchantJewelleryProfitScript extends Script {
         return totalOutput >= MIN_OUTPUTS_TO_SELL || (!hasMaterials && coins < MIN_COINS_RESERVE);
     }
 
-    private boolean preparePendingSwitchOutputSale(APIContext ctx) {
-        EnchantMethod sellMethod = pendingSwitchOutputSaleMethod;
+    private boolean preparePendingRotationOutputSale(APIContext ctx) {
+        EnchantMethod sellMethod = pendingRotationOutputSaleMethod;
         if (sellMethod == null) {
-            return false;
-        }
-
-        if (activeMethod != null && activeMethod.key.equals(sellMethod.key)) {
-            pendingSwitchOutputSaleMethod = null;
             return false;
         }
 
         int inventoryOutput = ctx.inventory().getCount(true, sellMethod.outputItem);
         int bankOutput = ctx.bank().isOpen() ? ctx.bank().getCount(sellMethod.outputItem) : 0;
         if (inventoryOutput + bankOutput <= 0) {
-            trace(ctx, sellMethod, "method-switch:no-output-to-sell");
-            pendingSwitchOutputSaleMethod = null;
+            trace(ctx, sellMethod, "rotation:no-output-to-sell");
+            pendingRotationOutputSaleMethod = null;
             return false;
         }
 
-        stats.setStatus("Selling previous output before switch: " + sellMethod.outputItem);
-        Quote sellQuote = pricing.quote(ctx, sellMethod);
+        stats.setStatus("Instant selling rotation output: " + sellMethod.outputItem);
         int pendingBefore = pendingGeActions.size();
-        boolean acted = prepareOutputSale(ctx, sellMethod, sellQuote.hasPrices() ? sellQuote : null);
+        boolean acted = prepareOutputSale(ctx, sellMethod);
         if (pendingGeActions.size() > pendingBefore) {
-            pendingSwitchOutputSaleMethod = null;
-            trace(ctx, sellMethod, "method-switch:queued-output-sale new="
+            pendingRotationOutputSaleMethod = null;
+            trace(ctx, sellMethod, "rotation:queued-output-sale active="
                     + (activeMethod == null ? "-" : activeMethod.key));
         }
         return acted;
     }
 
     private boolean prepareOutputSale(APIContext ctx, EnchantMethod method) {
-        Quote quote = activeQuote != null && activeQuote.method.key.equals(method.key) ? activeQuote : null;
-        return prepareOutputSale(ctx, method, quote);
-    }
-
-    private boolean prepareOutputSale(APIContext ctx, EnchantMethod method, Quote quote) {
         int inventoryOutput = ctx.inventory().getCount(true, method.outputItem);
         if (inventoryOutput <= 0) {
             stats.setStatus("Withdrawing " + method.outputItem + " as notes to sell");
@@ -712,11 +728,9 @@ public class EnchantJewelleryProfitScript extends Script {
             return false;
         }
 
-        int sellPrice = quote == null
-                ? pricing.quickSellPrice(ctx, method.outputItem, method.fallbackOutputSell)
-                : pricing.quickSellPrice(ctx, method.outputItem, quote.outputSellPrice);
+        int sellPrice = pricing.instantOutputSellPrice(ctx, method.outputItem, method.fallbackOutputSell);
         pendingGeActions.add(GeAction.sell(method.outputItem, inventoryOutput, sellPrice));
-        stats.lastGeAction = "Queued sale " + inventoryOutput + "x " + method.outputItem + " @ " + sellPrice;
+        stats.lastGeAction = "Queued instant sale " + inventoryOutput + "x " + method.outputItem + " @ " + sellPrice;
         log(stats.lastGeAction);
         closeBank(ctx, "Going to GE to sell " + method.outputItem);
         return true;
@@ -2097,12 +2111,13 @@ public class EnchantJewelleryProfitScript extends Script {
             int inputBuy = firstPositive(highPrice(input), lowPrice(input), method.fallbackInputBuy);
             int cosmicBuy = firstPositive(highPrice(cosmic), lowPrice(cosmic), 113L);
             int outputSell = firstPositive(lowPrice(output), highPrice(output), method.fallbackOutputSell);
+            int instantOutputSell = instantSellFromMarket(outputSell);
             long cost = (long) inputBuy + cosmicBuy;
-            long profit = outputSell <= 0 || inputBuy <= 0 || cosmicBuy <= 0
+            long profit = instantOutputSell <= 0 || inputBuy <= 0 || cosmicBuy <= 0
                     ? Long.MIN_VALUE
-                    : taxedSellValue(outputSell) - cost;
+                    : taxedSellValue(instantOutputSell) - cost;
             long profitPerHour = profit == Long.MIN_VALUE ? Long.MIN_VALUE : profit * 1600L;
-            return new Quote(method, inputBuy, cosmicBuy, outputSell, cost, profit, profitPerHour);
+            return new Quote(method, inputBuy, cosmicBuy, instantOutputSell, cost, profit, profitPerHour);
         }
 
         private int quickBuyPrice(APIContext ctx, String itemName, long fallbackPrice) {
@@ -2111,10 +2126,14 @@ public class EnchantJewelleryProfitScript extends Script {
             return clampToInt(Math.max(1L, Math.round(Math.ceil(market * BUY_MARKUP))));
         }
 
-        private int quickSellPrice(APIContext ctx, String itemName, long fallbackPrice) {
+        private int instantOutputSellPrice(APIContext ctx, String itemName, long fallbackPrice) {
             ItemDetail detail = itemDetail(ctx, itemName);
             long market = firstPositive(lowPrice(detail), highPrice(detail), fallbackPrice);
-            return clampToInt(Math.max(1L, Math.round(Math.floor(market * SELL_MARKDOWN))));
+            return instantSellFromMarket(market);
+        }
+
+        private int instantSellFromMarket(long market) {
+            return clampToInt(Math.max(1L, Math.round(Math.floor(market * INSTANT_OUTPUT_SELL_MARKDOWN))));
         }
 
         private ItemDetail itemDetail(APIContext ctx, String itemName) {

@@ -13,7 +13,7 @@ Current enabled methods:
 
 Stable tag: `stable-v0.1.26-panel-relative-spellbook-clicks`.
 
-Current build: `v0.1.29-lvl1-lvl2-market-methods`.
+Current build: `v0.1.30-rotation-instant-output-sell`.
 
 This build keeps the stable casting flow isolated while adding conservative Lvl-1/Lvl-2 method selection:
 
@@ -21,7 +21,8 @@ This build keeps the stable casting flow isolated while adding conservative Lvl-
 - filters by Magic level and per-method minimum profit;
 - favors more liquid methods with higher selector weights;
 - uses smaller restock batches for lower-liquidity outputs;
-- sells the previous method's output before switching to another method;
+- sells produced output at the end of each rotation before selecting or preparing the next method;
+- places output sell offers with aggressive instant-sell pricing;
 - buys missing jewellery and Cosmic runes through the Grand Exchange;
 - prepares inventory from the bank;
 - uses the live side-panel bounds for `218.15`, `218.16`, and `218.11`, only translating widget coordinates when they are outside that panel;
@@ -33,6 +34,8 @@ This build keeps the stable casting flow isolated while adding conservative Lvl-
 `v0.1.28` adds the next price-check countdown to the in-game overlay.
 
 `v0.1.29` enables selected Lvl-1 and Lvl-2 market-friendly methods and refreshes method selection every 20-30 minutes.
+
+`v0.1.30` forces a full output sale when each rotation ends, using aggressive Grand Exchange sell pricing before the next method is prepared.
 
 Runtime decisions are logged to the EpicBot client log with the `[Trace]` prefix.
 
